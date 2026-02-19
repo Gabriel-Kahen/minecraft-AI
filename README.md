@@ -27,7 +27,7 @@ TypeScript implementation of a planner/executor Minecraft automation stack:
 
 1. Install Node 20 and npm (pnpm also works).
 2. Copy orchestrator env:
-   - `cp /Users/gabrielkahen/Desktop/code/mc/apps/orchestrator/.env.example /Users/gabrielkahen/Desktop/code/mc/apps/orchestrator/.env`
+   - `cp apps/orchestrator/.env.example apps/orchestrator/.env`
 3. Set required Vertex fields (`GEMINI_PROJECT_ID`, location/model).
 4. Install dependencies from repo root:
    - `npm install`
@@ -40,31 +40,31 @@ TypeScript implementation of a planner/executor Minecraft automation stack:
 
 ### Windows Server
 
-- Install Paper with `/Users/gabrielkahen/Desktop/code/mc/infra/windows/install-paper.ps1`
-- Apply `/Users/gabrielkahen/Desktop/code/mc/infra/windows/server.properties`
-- Install NSSM service with `/Users/gabrielkahen/Desktop/code/mc/infra/windows/install-nssm-service.ps1`
+- Install Paper with `infra/windows/install-paper.ps1`
+- Apply `infra/windows/server.properties`
+- Install NSSM service with `infra/windows/install-nssm-service.ps1`
 
 ### Raspberry Pi
 
-- Deploy repo to `/opt/mc`
+- Deploy repo to your chosen deploy root (for example `mc`).
 - Copy env template:
-  - `cp /Users/gabrielkahen/Desktop/code/mc/infra/pi/mc-orchestrator.env.example /etc/mc-orchestrator.env`
+  - `cp infra/pi/mc-orchestrator.env.example <system-env-file>`
 - Install service:
-  - `sudo /Users/gabrielkahen/Desktop/code/mc/infra/pi/install-service.sh`
+  - `sudo infra/pi/install-service.sh`
 
 ## Contracts
 
-- Snapshot schema: `/Users/gabrielkahen/Desktop/code/mc/contracts/snapshot.schema.json`
-- Planner schema: `/Users/gabrielkahen/Desktop/code/mc/contracts/planner.schema.json`
-- Skill types/failure codes: `/Users/gabrielkahen/Desktop/code/mc/contracts/skills.ts`
-- Event contracts: `/Users/gabrielkahen/Desktop/code/mc/contracts/events.ts`
+- Snapshot schema: `contracts/snapshot.schema.json`
+- Planner schema: `contracts/planner.schema.json`
+- Skill types/failure codes: `contracts/skills.ts`
+- Event contracts: `contracts/events.ts`
 
 ## Metrics and Logs
 
 - Metrics endpoint: `http://<pi-host>:9464/metrics`
 - Health endpoint: `http://<pi-host>:9464/healthz`
-- JSONL logs: `/var/log/mc-orchestrator/*.jsonl`
-- SQLite state: `/var/lib/mc-orchestrator/state.sqlite`
+- JSONL logs: `LOG_DIR/*.jsonl`
+- SQLite state: `SQLITE_FILE`
 
 ## Current Scope
 

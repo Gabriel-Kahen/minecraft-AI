@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mc.local/contracts/snapshot-v1.schema.json",
+  "title": "SnapshotV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "bot_id",
+    "time",
+    "player",
+    "inventory_summary",
+    "nearby_summary",
+    "task_context"
+  ],
+  "properties": {
+    "bot_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "time": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tick", "day_phase"],
+      "properties": {
+        "tick": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "day_phase": {
+          "type": "string",
+          "enum": ["dawn", "day", "dusk", "night"]
+        }
+      }
+    },
+    "player": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["position", "dimension", "health", "hunger", "status_effects"],
+      "properties": {
+        "position": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["x", "y", "z"],
+          "properties": {
+            "x": { "type": "number" },
+            "y": { "type": "number" },
+            "z": { "type": "number" }
+          }
+        },
+        "dimension": {
+          "type": "string"
+        },
+        "health": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "hunger": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "status_effects": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "inventory_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["food_total", "tools", "blocks", "key_items"],
+      "properties": {
+        "food_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tools": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "blocks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "key_items": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "nearby_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hostiles", "resources", "points_of_interest"],
+      "properties": {
+        "hostiles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "distance"],
+            "properties": {
+              "type": { "type": "string" },
+              "distance": { "type": "number", "minimum": 0 }
+            }
+          }
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "distance", "position"],
+            "properties": {
+              "type": { "type": "string" },
+              "distance": { "type": "number", "minimum": 0 },
+              "position": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["x", "y", "z"],
+                "properties": {
+                  "x": { "type": "number" },
+                  "y": { "type": "number" },
+                  "z": { "type": "number" }
+                }
+              }
+            }
+          }
+        },
+        "points_of_interest": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "distance", "position"],
+            "properties": {
+              "type": { "type": "string" },
+              "distance": { "type": "number", "minimum": 0 },
+              "position": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["x", "y", "z"],
+                "properties": {
+                  "x": { "type": "number" },
+                  "y": { "type": "number" },
+                  "z": { "type": "number" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "task_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current_goal", "current_subgoal", "progress_counters"],
+      "properties": {
+        "current_goal": {
+          "type": ["string", "null"]
+        },
+        "current_subgoal": {
+          "type": ["string", "null"]
+        },
+        "progress_counters": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number"
+          }
+        },
+        "last_error": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["code", "details"],
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

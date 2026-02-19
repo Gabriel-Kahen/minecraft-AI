@@ -1,0 +1,33 @@
+{
+  "name": "mc-llm-agent",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Minecraft LLM-agent orchestrator with 5 headless Mineflayer bots",
+  "packageManager": "pnpm@9.15.5",
+  "scripts": {
+    "build": "npm run --workspace @mc/orchestrator build",
+    "test": "npm run --workspace @mc/orchestrator test",
+    "dev": "npm run --workspace @mc/orchestrator dev"
+  },
+  "overrides": {
+    "mineflayer-collectblock": {
+      "mineflayer": "4.22.0"
+    },
+    "mineflayer-tool": {
+      "mineflayer": "4.22.0"
+    },
+    "mineflayer-pvp": {
+      "mineflayer": "4.22.0"
+    },
+    "mineflayer-auto-eat": {
+      "mineflayer": "4.22.0"
+    },
+    "mineflayer-armor-manager": {
+      "mineflayer": "4.22.0"
+    },
+    "minecraft-protocol": "1.49.0"
+  },
+  "workspaces": [
+    "apps/*"
+  ]
+}

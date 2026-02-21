@@ -108,6 +108,43 @@ export class BotController {
     return this.connected;
   }
 
+  canChat(): boolean {
+    return this.connected && Boolean(this.bot?.chat);
+  }
+
+  chat(message: string): void {
+    if (!this.canChat()) {
+      return;
+    }
+
+    try {
+      this.bot.chat(message);
+    } catch {
+      // best-effort status broadcast only
+    }
+  }
+
+  taskSummary(): string {
+    if (!this.connected) {
+      return "offline";
+    }
+
+    if (this.taskState.currentSubgoal?.name) {
+      return this.taskState.currentSubgoal.name;
+    }
+
+    const queued = this.taskState.queue[0]?.name;
+    if (queued) {
+      return `queued:${queued}`;
+    }
+
+    if (this.taskState.currentGoal) {
+      return `goal:${this.taskState.currentGoal.slice(0, 20)}`;
+    }
+
+    return "idle";
+  }
+
   async start(): Promise<void> {
     this.stopped = false;
     this.deps.store.upsertBot(this.botId, nowIso());
@@ -399,7 +436,17 @@ export class BotController {
       }
 
       if (this.taskState.queue.length === 0) {
-        this.taskState.pendingTriggers.push("IDLE");
+        this.log("PLANNER_EMPTY_FALLBACK", {
+          status: outcome.status,
+          next_goal: outcome.response.next_goal
+        });
+        this.taskState.queue = [
+          this.runtimeSubgoal({
+            name: "explore",
+            params: { radius: 20, return_to_base: true },
+            success_criteria: { explored_points_min: 1 }
+          })
+        ];
       }
     } catch (error) {
       this.taskState.plannerCooldownUntil = Date.now() + this.deps.config.PLANNER_COOLDOWN_MS;
@@ -530,31 +577,42 @@ export class BotController {
         materialized.push(subgoal);
         continue;
       }
+      try {
+        const design = await this.deps.blueprintDesigner.designAndPersist({
+          botId: this.botId,
+          nextGoal,
+          subgoal,
+          snapshot
+        });
 
-      const design = await this.deps.blueprintDesigner.designAndPersist({
-        botId: this.botId,
-        nextGoal,
-        subgoal,
-        snapshot
-      });
+        const withGeneratedPath: PlannerSubgoal = {
+          ...subgoal,
+          params: {
+            ...subgoal.params,
+            path: design.filePath,
+            blueprint_name: design.blueprint.name,
+            blueprint_generated_at: design.generatedAt
+          }
+        };
+        materialized.push(withGeneratedPath);
 
-      const withGeneratedPath: PlannerSubgoal = {
-        ...subgoal,
-        params: {
-          ...subgoal.params,
-          path: design.filePath,
+        this.log("BLUEPRINT_DESIGNED", {
+          source_goal: nextGoal,
           blueprint_name: design.blueprint.name,
-          blueprint_generated_at: design.generatedAt
-        }
-      };
-      materialized.push(withGeneratedPath);
-
-      this.log("BLUEPRINT_DESIGNED", {
-        source_goal: nextGoal,
-        blueprint_name: design.blueprint.name,
-        blueprint_path: design.filePath,
-        block_count: design.blueprint.blocks.length
-      });
+          blueprint_path: design.filePath,
+          block_count: design.blueprint.blocks.length
+        });
+      } catch (error) {
+        this.log("INCIDENT", {
+          category: "blueprint_design",
+          error: error instanceof Error ? error.message : String(error)
+        });
+        materialized.push({
+          name: "explore",
+          params: { radius: 20, return_to_base: true },
+          success_criteria: { explored_points_min: 1 }
+        });
+      }
     }
 
     return materialized;

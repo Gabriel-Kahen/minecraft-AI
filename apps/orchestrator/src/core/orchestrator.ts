@@ -36,6 +36,8 @@ export class Orchestrator {
 
   private activeGaugeTimer: NodeJS.Timeout | null = null;
 
+  private chatStatusTimer: NodeJS.Timeout | null = null;
+
   constructor(deps: OrchestratorDependencies) {
     this.deps = deps;
     this.lockManager = new LockManager(deps.store, deps.config.LOCK_LEASE_MS);
@@ -83,6 +85,13 @@ export class Orchestrator {
       this.deps.metrics.setActiveBots(active);
     }, 2500);
     this.activeGaugeTimer.unref();
+
+    if (this.deps.config.CHAT_STATUS_ENABLED) {
+      this.chatStatusTimer = setInterval(() => {
+        this.broadcastTaskStatus();
+      }, this.deps.config.CHAT_STATUS_INTERVAL_MS);
+      this.chatStatusTimer.unref();
+    }
   }
 
   async stop(): Promise<void> {
@@ -90,11 +99,37 @@ export class Orchestrator {
       clearInterval(this.activeGaugeTimer);
       this.activeGaugeTimer = null;
     }
+    if (this.chatStatusTimer) {
+      clearInterval(this.chatStatusTimer);
+      this.chatStatusTimer = null;
+    }
 
     for (const controller of this.controllers) {
       await controller.stop();
     }
 
     this.controllers.length = 0;
+  }
+
+  private broadcastTaskStatus(): void {
+    const speaker = this.controllers.find((controller) => controller.canChat());
+    if (!speaker) {
+      this.deps.logger.write("orchestrator", {
+        ts: nowIso(),
+        type: "CHAT_STATUS_SKIPPED",
+        payload: { reason: "no_connected_speaker" }
+      });
+      return;
+    }
+
+    const segments = this.controllers.map((controller) => `${controller.id}:${controller.taskSummary()}`);
+    const line = `[tasks] ${segments.join(" | ")}`.slice(0, 240);
+    speaker.chat(line);
+    this.deps.logger.write("orchestrator", {
+      ts: nowIso(),
+      botId: speaker.id,
+      type: "CHAT_STATUS_SENT",
+      payload: { line }
+    });
   }
 }

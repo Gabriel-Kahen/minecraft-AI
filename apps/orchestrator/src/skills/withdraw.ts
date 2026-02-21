@@ -6,8 +6,8 @@ export const withdrawSkill = async (
   ctx: SkillExecutionContext,
   params: Record<string, unknown>
 ): Promise<SkillResultV1> => {
-  const itemName = String(params.item ?? "");
-  const count = Number(params.count ?? 1);
+  const itemName = String(params.item ?? params.type ?? params.resource ?? "");
+  const count = Number(params.count ?? params.amount ?? params.qty ?? 1);
   if (!itemName) {
     return failure("DEPENDS_ON_ITEM", "withdraw requires item name", false);
   }

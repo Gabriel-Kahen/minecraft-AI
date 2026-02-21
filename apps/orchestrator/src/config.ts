@@ -17,12 +17,17 @@ const envSchema = z.object({
   BOT_START_STAGGER_MS: z.coerce.number().int().min(0).default(2500),
   RECONNECT_BASE_DELAY_MS: z.coerce.number().int().min(1000).default(12000),
   RECONNECT_JITTER_MS: z.coerce.number().int().min(0).default(8000),
-  MAX_CONCURRENT_SKILLS: z.coerce.number().int().min(1).max(5).default(3),
+  MAX_CONCURRENT_SKILLS: z.coerce.number().int().min(1).max(5).default(4),
+  ALWAYS_ACTIVE_MODE: z
+    .string()
+    .optional()
+    .transform((value) => value !== "false"),
+  ALWAYS_ACTIVE_REQUEUE_MS: z.coerce.number().int().min(500).default(2500),
   CHAT_STATUS_ENABLED: z
     .string()
     .optional()
     .transform((value) => value !== "false"),
-  CHAT_STATUS_INTERVAL_MS: z.coerce.number().int().min(5000).default(30000),
+  CHAT_STATUS_INTERVAL_MS: z.coerce.number().int().min(5000).default(10000),
   LLM_HISTORY_LIMIT: z.coerce.number().int().min(1).max(30).default(20),
   PLANNER_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).default(6000),
   PLANNER_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(2),

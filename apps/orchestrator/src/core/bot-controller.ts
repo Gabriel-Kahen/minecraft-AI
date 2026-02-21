@@ -11,7 +11,7 @@ import { buildSnapshot, loadMineflayerPlugins } from "../bots";
 import type { ExplorerLimiter, LockManager, SkillLimiter } from "../coordination";
 import { ActionHistoryBuffer } from "./history-buffer";
 import type { PlannerTrigger, RuntimeSubgoal, RuntimeTaskState } from "./types";
-import type { BlueprintDesigner, PlannerService } from "../planner";
+import { enforceSubgoalPrerequisites, type BlueprintDesigner, type PlannerService } from "../planner";
 import { nowIso } from "../utils/time";
 import { makeId } from "../utils/id";
 import type { SQLiteStore, JsonlLogger } from "../store";
@@ -76,6 +76,8 @@ export class BotController {
   private lastSnapshotAtMs = 0;
 
   private disconnectStreak = 0;
+
+  private lastAlwaysActiveAtMs = 0;
 
   constructor(botId: string, deps: BotControllerDependencies) {
     this.botId = botId;
@@ -354,6 +356,56 @@ export class BotController {
       }
       await this.requestPlan(freshSnapshot);
     }
+
+    if (this.taskState.queue.length === 0) {
+      this.enqueueAlwaysActiveSubgoal(now);
+    }
+  }
+
+  private enqueueAlwaysActiveSubgoal(nowMs: number): void {
+    if (!this.deps.config.ALWAYS_ACTIVE_MODE || !this.bot) {
+      return;
+    }
+    if (this.taskState.busy || this.taskState.queue.length > 0) {
+      return;
+    }
+    if (nowMs - this.lastAlwaysActiveAtMs < this.deps.config.ALWAYS_ACTIVE_REQUEUE_MS) {
+      return;
+    }
+
+    const position = this.bot.entity?.position;
+    if (!position) {
+      return;
+    }
+
+    const angle = Math.random() * Math.PI * 2;
+    const distance = 8 + Math.random() * 10;
+    const targetX = Math.round(position.x + Math.cos(angle) * distance);
+    const targetZ = Math.round(position.z + Math.sin(angle) * distance);
+    const targetY = Math.round(position.y);
+
+    this.taskState.queue = [
+      this.runtimeSubgoal({
+        name: "goto",
+        params: {
+          x: targetX,
+          y: targetY,
+          z: targetZ,
+          range: 2
+        },
+        success_criteria: {
+          within_range: 2
+        }
+      })
+    ];
+    this.lastAlwaysActiveAtMs = nowMs;
+
+    this.log("ALWAYS_ACTIVE_ENQUEUED", {
+      subgoal: "goto",
+      x: targetX,
+      y: targetY,
+      z: targetZ
+    });
   }
 
   private refreshSnapshot(nowMs: number, force: boolean): SnapshotV1 | null {
@@ -424,9 +476,18 @@ export class BotController {
         outcome.response.next_goal,
         outcome.response.subgoals
       );
-      this.taskState.queue = materializedSubgoals.map((subgoal) => this.runtimeSubgoal(subgoal));
+      const guarded = enforceSubgoalPrerequisites(snapshot, materializedSubgoals);
+      this.taskState.queue = guarded.subgoals.map((subgoal) => this.runtimeSubgoal(subgoal));
       this.taskState.pendingTriggers = [];
       this.lastPlanAt = Date.now();
+
+      if (guarded.notes.length > 0) {
+        this.log("PLANNER_GUARD_APPLIED", {
+          notes: guarded.notes,
+          original_count: materializedSubgoals.length,
+          guarded_count: guarded.subgoals.length
+        });
+      }
 
       if (outcome.status !== "SUCCESS") {
         this.log("PLANNER_FALLBACK", {

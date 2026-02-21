@@ -6,7 +6,13 @@ export const gotoNearestSkill = async (
   ctx: SkillExecutionContext,
   params: Record<string, unknown>
 ): Promise<SkillResultV1> => {
-  const blockName = String(params.block ?? params.resource ?? "");
+  const blockName = String(
+    params.block ??
+      params.resource ??
+      params.resource_type ??
+      params.type ??
+      ""
+  );
   const maxDistance = Number(params.max_distance ?? 48);
   if (!blockName) {
     return failure("DEPENDS_ON_ITEM", "goto_nearest requires block/resource name", false);

@@ -28,8 +28,8 @@ export const craftSkill = async (
   ctx: SkillExecutionContext,
   params: Record<string, unknown>
 ): Promise<SkillResultV1> => {
-  const itemName = String(params.item ?? "");
-  const count = Number(params.count ?? 1);
+  const itemName = String(params.item ?? params.output ?? params.result ?? params.type ?? "");
+  const count = Number(params.count ?? params.amount ?? params.qty ?? 1);
   if (!itemName) {
     return failure("DEPENDS_ON_ITEM", "craft requires item name", false);
   }

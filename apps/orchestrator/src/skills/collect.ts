@@ -6,8 +6,15 @@ export const collectSkill = async (
   ctx: SkillExecutionContext,
   params: Record<string, unknown>
 ): Promise<SkillResultV1> => {
-  const targetName = String(params.item ?? params.block ?? "");
-  const desiredCount = Number(params.count ?? 1);
+  const targetName = String(
+    params.item ??
+      params.block ??
+      params.resource ??
+      params.resource_type ??
+      params.type ??
+      ""
+  );
+  const desiredCount = Number(params.count ?? params.amount ?? params.qty ?? 1);
   const maxDistance = Number(params.max_distance ?? 48);
 
   if (!targetName) {

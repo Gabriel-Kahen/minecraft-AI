@@ -6,9 +6,9 @@ export const smeltSkill = async (
   ctx: SkillExecutionContext,
   params: Record<string, unknown>
 ): Promise<SkillResultV1> => {
-  const inputName = String(params.input ?? "");
-  const fuelName = String(params.fuel ?? "coal");
-  const count = Number(params.count ?? 1);
+  const inputName = String(params.input ?? params.item ?? params.type ?? "");
+  const fuelName = String(params.fuel ?? params.fuel_item ?? "coal");
+  const count = Number(params.count ?? params.amount ?? params.qty ?? 1);
 
   if (!inputName) {
     return failure("DEPENDS_ON_ITEM", "smelt requires input item name", false);

@@ -12,7 +12,32 @@ import { MetricsService } from "./observability";
 import { ensureDir } from "./utils/fs";
 import { JsonlLogger, SQLiteStore } from "./store";
 
+const installLogGuards = (): void => {
+  const originalWarn = console.warn.bind(console);
+  const marker = "deprecated event (physicTick)";
+  let suppressed = 0;
+  let lastReportMs = Date.now();
+
+  console.warn = (...args: unknown[]): void => {
+    const rendered = args.map((value) => (typeof value === "string" ? value : String(value))).join(" ");
+    if (rendered.includes(marker)) {
+      suppressed += 1;
+      const now = Date.now();
+      if (now - lastReportMs >= 60000) {
+        originalWarn(`[mc-orchestrator] suppressed ${suppressed} physicTick deprecation warnings in last minute`);
+        suppressed = 0;
+        lastReportMs = now;
+      }
+      return;
+    }
+
+    originalWarn(...args);
+  };
+};
+
 const bootstrap = async (): Promise<void> => {
+  installLogGuards();
+
   const config = loadConfig();
 
   ensureDir(config.DATA_DIR);

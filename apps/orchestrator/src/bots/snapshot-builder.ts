@@ -86,34 +86,50 @@ const nearbyBlocksByName = (
 ): Array<{ type: string; distance: number; position: { x: number; y: number; z: number } }> => {
   const blocks: Array<{ type: string; distance: number; position: { x: number; y: number; z: number } }> = [];
   const mcData = require("minecraft-data")(bot.version);
+  const blockIdSet = new Set<number>();
+  const requestedNames = new Set<string>();
 
   for (const name of names) {
     const blockDef = mcData.blocksByName[name];
     if (!blockDef) {
       continue;
     }
+    blockIdSet.add(blockDef.id);
+    requestedNames.add(name);
+  }
 
-    const found = bot.findBlock({
-      matching: blockDef.id,
-      maxDistance,
-      count: maxResults
-    }) as any[] | null;
+  if (blockIdSet.size === 0) {
+    return blocks;
+  }
 
-    if (!found) {
+  const found = bot.findBlocks({
+    matching: (block: { type: number }) => blockIdSet.has(block.type),
+    maxDistance,
+    count: maxResults * 6
+  }) as unknown;
+
+  if (!found) {
+    return blocks;
+  }
+
+  const foundBlocks = Array.isArray(found) ? found : [found];
+  for (const position of foundBlocks) {
+    if (!position) {
       continue;
     }
-
-    for (const block of found) {
-      blocks.push({
-        type: name,
-        distance: bot.entity.position.distanceTo(block.position),
-        position: {
-          x: block.position.x,
-          y: block.position.y,
-          z: block.position.z
-        }
-      });
+    const block = bot.blockAt(position);
+    if (!block || !requestedNames.has(block.name)) {
+      continue;
     }
+    blocks.push({
+      type: block.name,
+      distance: bot.entity.position.distanceTo(position),
+      position: {
+        x: position.x,
+        y: position.y,
+        z: position.z
+      }
+    });
   }
 
   return blocks.sort((a, b) => a.distance - b.distance).slice(0, maxResults);
@@ -146,8 +162,8 @@ export const buildSnapshot = (
     inventory_summary: inventorySummary(bot),
     nearby_summary: {
       hostiles: nearbyHostiles(bot),
-      resources: nearbyBlocksByName(bot, RESOURCE_BLOCKS, 32, 8),
-      points_of_interest: nearbyBlocksByName(bot, POI_BLOCKS, 32, 6)
+      resources: nearbyBlocksByName(bot, RESOURCE_BLOCKS, 24, 6),
+      points_of_interest: nearbyBlocksByName(bot, POI_BLOCKS, 24, 4)
     },
     task_context: {
       current_goal: taskState.currentGoal,

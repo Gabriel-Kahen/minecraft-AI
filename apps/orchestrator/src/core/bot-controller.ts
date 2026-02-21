@@ -8,7 +8,7 @@ import {
 } from "../../../../contracts/skills";
 import type { MetricsService } from "../observability";
 import { buildSnapshot, loadMineflayerPlugins } from "../bots";
-import type { ExplorerLimiter, LockManager } from "../coordination";
+import type { ExplorerLimiter, LockManager, SkillLimiter } from "../coordination";
 import { ActionHistoryBuffer } from "./history-buffer";
 import type { PlannerTrigger, RuntimeSubgoal, RuntimeTaskState } from "./types";
 import type { BlueprintDesigner, PlannerService } from "../planner";
@@ -18,9 +18,6 @@ import type { SQLiteStore, JsonlLogger } from "../store";
 import { ReflexManager } from "../reflex";
 import { SkillEngine } from "../skills";
 import type { AppConfig } from "../config";
-
-const reconnectDelayMs = (): number => 7000 + Math.floor(Math.random() * 2500);
-const snapshotRefreshMs = 3000;
 
 const formatDisconnectReason = (reason: unknown): string => {
   if (typeof reason === "string") {
@@ -43,6 +40,7 @@ export interface BotControllerDependencies {
   metrics: MetricsService;
   lockManager: LockManager;
   explorerLimiter: ExplorerLimiter;
+  skillLimiter: SkillLimiter;
   skillEngine: SkillEngine;
   blueprintRoot: string;
   blueprintDesigner: BlueprintDesigner;
@@ -76,6 +74,8 @@ export class BotController {
   private lastSnapshot: SnapshotV1 | null = null;
 
   private lastSnapshotAtMs = 0;
+
+  private disconnectStreak = 0;
 
   constructor(botId: string, deps: BotControllerDependencies) {
     this.botId = botId;
@@ -173,6 +173,7 @@ export class BotController {
         return;
       }
       this.connected = true;
+      this.disconnectStreak = 0;
       this.log("CONNECTED", {});
       this.reflexManager.attach(bot, {
         isBusy: () => this.taskState.busy,
@@ -194,10 +195,11 @@ export class BotController {
       if (this.bot !== bot || this.stopped) {
         return;
       }
+      const formatted = formatDisconnectReason(reason);
       this.log("DISCONNECTED", {
-        reason: formatDisconnectReason(reason)
+        reason: formatted
       });
-      this.scheduleReconnect(bot, "kicked");
+      this.scheduleReconnect(bot, "kicked", formatted);
     });
 
     bot.on("end", () => {
@@ -221,11 +223,12 @@ export class BotController {
     });
   }
 
-  private scheduleReconnect(sourceBot: any, reason: "kicked" | "end"): void {
+  private scheduleReconnect(sourceBot: any, reason: "kicked" | "end", detail?: string): void {
     if (this.reconnectPending || this.stopped || this.bot !== sourceBot) {
       return;
     }
 
+    this.disconnectStreak += 1;
     this.connected = false;
     this.reconnectPending = true;
     this.taskState.busy = false;
@@ -233,7 +236,12 @@ export class BotController {
     this.taskState.currentSubgoal = null;
     this.pushTrigger("RECONNECT", { reason: `scheduled_${reason}` });
     this.deps.metrics.recordReconnect(this.botId);
-    const delayMs = reconnectDelayMs();
+    const timeoutRelated = detail?.includes("disconnect.timeout") || detail?.includes("Timed out");
+    const streakPenaltyMs = Math.min(this.disconnectStreak, 6) * (timeoutRelated ? 6000 : 3000);
+    const delayMs =
+      this.deps.config.RECONNECT_BASE_DELAY_MS +
+      Math.floor(Math.random() * this.deps.config.RECONNECT_JITTER_MS) +
+      streakPenaltyMs;
 
     setTimeout(() => {
       if (this.stopped) {
@@ -316,7 +324,11 @@ export class BotController {
   }
 
   private refreshSnapshot(nowMs: number, force: boolean): SnapshotV1 | null {
-    if (!force && this.lastSnapshot && nowMs - this.lastSnapshotAtMs < snapshotRefreshMs) {
+    if (
+      !force &&
+      this.lastSnapshot &&
+      nowMs - this.lastSnapshotAtMs < this.deps.config.SNAPSHOT_REFRESH_MS
+    ) {
       return this.lastSnapshot;
     }
 
@@ -407,8 +419,13 @@ export class BotController {
   }
 
   private async executeNextSubgoal(): Promise<void> {
+    if (!this.deps.skillLimiter.tryEnter(this.botId)) {
+      return;
+    }
+
     const subgoal = this.taskState.queue.shift();
     if (!subgoal || !this.bot) {
+      this.deps.skillLimiter.leave(this.botId);
       return;
     }
 
@@ -422,76 +439,79 @@ export class BotController {
       params: subgoal.params
     });
 
-    const result = await this.deps.skillEngine.execute(
-      {
-        botId: this.botId,
-        bot: this.bot,
-        lockManager: this.deps.lockManager,
-        explorerLimiter: this.deps.explorerLimiter,
-        logger: this.deps.logger,
-        base: {
-          x: this.deps.config.BASE_X,
-          y: this.deps.config.BASE_Y,
-          z: this.deps.config.BASE_Z,
-          radius: this.deps.config.BASE_RADIUS
+    try {
+      const result = await this.deps.skillEngine.execute(
+        {
+          botId: this.botId,
+          bot: this.bot,
+          lockManager: this.deps.lockManager,
+          explorerLimiter: this.deps.explorerLimiter,
+          logger: this.deps.logger,
+          base: {
+            x: this.deps.config.BASE_X,
+            y: this.deps.config.BASE_Y,
+            z: this.deps.config.BASE_Z,
+            radius: this.deps.config.BASE_RADIUS
+          },
+          lockHeartbeatMs: this.deps.config.LOCK_HEARTBEAT_MS,
+          blueprintRoot: this.deps.blueprintRoot
         },
-        lockHeartbeatMs: this.deps.config.LOCK_HEARTBEAT_MS,
-        blueprintRoot: this.deps.blueprintRoot
-      },
-      subgoal
-    );
+        subgoal
+      );
 
-    const endedAt = nowIso();
-    const durationMs = Date.now() - startedAtMs;
-    this.deps.metrics.recordSubgoal(this.botId, subgoal.name, result.outcome, durationMs);
+      const endedAt = nowIso();
+      const durationMs = Date.now() - startedAtMs;
+      this.deps.metrics.recordSubgoal(this.botId, subgoal.name, result.outcome, durationMs);
 
-    const historyEntry: ActionHistoryEntry = {
-      timestamp: endedAt,
-      subgoal_name: subgoal.name as SubgoalName,
-      params: subgoal.params,
-      outcome: result.outcome,
-      error_code: result.outcome === "FAILURE" ? (result.errorCode as FailureCode) : null,
-      error_details: result.outcome === "FAILURE" ? result.details : null,
-      duration_ms: durationMs
-    };
-
-    this.history.add(historyEntry);
-    this.taskState.history = this.history.snapshot();
-
-    this.deps.store.insertSubgoalAttempt({
-      id: subgoal.id,
-      botId: this.botId,
-      subgoal: subgoal.name,
-      startedAt,
-      endedAt,
-      durationMs,
-      result
-    });
-
-    if (result.outcome === "FAILURE") {
-      this.taskState.lastError = {
-        code: result.errorCode,
-        details: result.details
+      const historyEntry: ActionHistoryEntry = {
+        timestamp: endedAt,
+        subgoal_name: subgoal.name as SubgoalName,
+        params: subgoal.params,
+        outcome: result.outcome,
+        error_code: result.outcome === "FAILURE" ? (result.errorCode as FailureCode) : null,
+        error_details: result.outcome === "FAILURE" ? result.details : null,
+        duration_ms: durationMs
       };
-      this.taskState.plannerCooldownUntil = Date.now() + this.deps.config.PLANNER_COOLDOWN_MS;
-      this.taskState.pendingTriggers = ["SUBGOAL_FAILED"];
-      this.deps.metrics.recordFailure(this.botId, result.errorCode);
-    } else {
-      this.taskState.progressCounters[subgoal.name] =
-        (this.taskState.progressCounters[subgoal.name] ?? 0) + 1;
-      if (this.taskState.queue.length === 0) {
-        this.taskState.pendingTriggers = ["SUBGOAL_COMPLETED"];
+
+      this.history.add(historyEntry);
+      this.taskState.history = this.history.snapshot();
+
+      this.deps.store.insertSubgoalAttempt({
+        id: subgoal.id,
+        botId: this.botId,
+        subgoal: subgoal.name,
+        startedAt,
+        endedAt,
+        durationMs,
+        result
+      });
+
+      if (result.outcome === "FAILURE") {
+        this.taskState.lastError = {
+          code: result.errorCode,
+          details: result.details
+        };
+        this.taskState.plannerCooldownUntil = Date.now() + this.deps.config.PLANNER_COOLDOWN_MS;
+        this.taskState.pendingTriggers = ["SUBGOAL_FAILED"];
+        this.deps.metrics.recordFailure(this.botId, result.errorCode);
+      } else {
+        this.taskState.progressCounters[subgoal.name] =
+          (this.taskState.progressCounters[subgoal.name] ?? 0) + 1;
+        if (this.taskState.queue.length === 0) {
+          this.taskState.pendingTriggers = ["SUBGOAL_COMPLETED"];
+        }
       }
+
+      this.log("SUBGOAL_FINISHED", {
+        subgoal: subgoal.name,
+        result,
+        queue_remaining: this.taskState.queue.length
+      });
+    } finally {
+      this.taskState.currentSubgoal = null;
+      this.taskState.busy = false;
+      this.deps.skillLimiter.leave(this.botId);
     }
-
-    this.log("SUBGOAL_FINISHED", {
-      subgoal: subgoal.name,
-      result,
-      queue_remaining: this.taskState.queue.length
-    });
-
-    this.taskState.currentSubgoal = null;
-    this.taskState.busy = false;
   }
 
   private runtimeSubgoal(subgoal: PlannerSubgoal): RuntimeSubgoal {

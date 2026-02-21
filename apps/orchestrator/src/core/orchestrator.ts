@@ -5,7 +5,8 @@ import { nowIso, sleep } from "../utils/time";
 import type { JsonlLogger, SQLiteStore } from "../store";
 import {
   ExplorerLimiter,
-  LockManager
+  LockManager,
+  SkillLimiter
 } from "../coordination";
 import { SkillEngine } from "../skills";
 import { BotController, type BotControllerDependencies } from "./bot-controller";
@@ -31,12 +32,15 @@ export class Orchestrator {
 
   private readonly skillEngine: SkillEngine;
 
+  private readonly skillLimiter: SkillLimiter;
+
   private activeGaugeTimer: NodeJS.Timeout | null = null;
 
   constructor(deps: OrchestratorDependencies) {
     this.deps = deps;
     this.lockManager = new LockManager(deps.store, deps.config.LOCK_LEASE_MS);
     this.explorerLimiter = new ExplorerLimiter(deps.config.MAX_CONCURRENT_EXPLORERS);
+    this.skillLimiter = new SkillLimiter(deps.config.MAX_CONCURRENT_SKILLS);
     this.skillEngine = new SkillEngine();
   }
 
@@ -58,6 +62,7 @@ export class Orchestrator {
       metrics: this.deps.metrics,
       lockManager: this.lockManager,
       explorerLimiter: this.explorerLimiter,
+      skillLimiter: this.skillLimiter,
       skillEngine: this.skillEngine
     };
 
@@ -70,7 +75,7 @@ export class Orchestrator {
       this.controllers.push(controller);
 
       await controller.start();
-      await sleep(500);
+      await sleep(this.deps.config.BOT_START_STAGGER_MS);
     }
 
     this.activeGaugeTimer = setInterval(() => {

@@ -122,14 +122,19 @@ export class Orchestrator {
       return;
     }
 
-    const segments = this.controllers.map((controller) => `${controller.id}:${controller.taskSummary()}`);
-    const line = `[tasks] ${segments.join(" | ")}`.slice(0, 240);
-    speaker.chat(line);
+    const connected = this.controllers.filter((controller) => controller.isConnected()).length;
+    const lines = [
+      `[tasks] connected ${connected}/${this.controllers.length}`,
+      ...this.controllers.map((controller) => `[task] ${controller.id} ${controller.taskSummary()}`.slice(0, 240))
+    ];
+    for (const line of lines) {
+      speaker.chat(line);
+    }
     this.deps.logger.write("orchestrator", {
       ts: nowIso(),
       botId: speaker.id,
       type: "CHAT_STATUS_SENT",
-      payload: { line }
+      payload: { lines }
     });
   }
 }

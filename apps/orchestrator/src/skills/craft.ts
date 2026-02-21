@@ -1,6 +1,6 @@
 import type { SkillResultV1 } from "../../../../contracts/skills";
 import type { SkillExecutionContext } from "./context";
-import { asSkillFailure, failure, findNearestBlock, success } from "./helpers";
+import { asSkillFailure, countItem, failure, findNearestBlock, success } from "./helpers";
 
 const placeCraftingTableIfNeeded = async (ctx: SkillExecutionContext): Promise<any | null> => {
   let table = findNearestBlock(ctx, "crafting_table", 8);
@@ -29,7 +29,7 @@ export const craftSkill = async (
   params: Record<string, unknown>
 ): Promise<SkillResultV1> => {
   const itemName = String(params.item ?? params.output ?? params.result ?? params.type ?? "");
-  const count = Number(params.count ?? params.amount ?? params.qty ?? 1);
+  const desiredUnits = Math.max(1, Math.floor(Number(params.count ?? params.amount ?? params.qty ?? 1) || 1));
   if (!itemName) {
     return failure("DEPENDS_ON_ITEM", "craft requires item name", false);
   }
@@ -41,8 +41,8 @@ export const craftSkill = async (
   }
 
   try {
-    let crafted = 0;
-    while (crafted < count) {
+    const before = countItem(ctx, itemName);
+    while (countItem(ctx, itemName) - before < desiredUnits) {
       let table: any = null;
       let recipes = ctx.bot.recipesFor(item.id, null, 1, null);
       if (recipes.length === 0) {
@@ -59,10 +59,10 @@ export const craftSkill = async (
       }
 
       await ctx.bot.craft(recipe, 1, table);
-      crafted += 1;
     }
 
-    return success(`crafted ${count} ${itemName}`, { crafted: count });
+    const craftedUnits = countItem(ctx, itemName) - before;
+    return success(`crafted ${craftedUnits} ${itemName}`, { crafted: craftedUnits });
   } catch (error) {
     return asSkillFailure(error, "DEPENDS_ON_ITEM");
   }

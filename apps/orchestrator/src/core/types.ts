@@ -16,6 +16,7 @@ export type PlannerTrigger =
 export interface RuntimeSubgoal extends PlannerSubgoal {
   id: string;
   assignedAt: string;
+  retryCount: number;
 }
 
 export interface RuntimeTaskState {

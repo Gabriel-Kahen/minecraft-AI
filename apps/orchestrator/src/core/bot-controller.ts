@@ -10,6 +10,7 @@ import type { MetricsService } from "../observability";
 import { buildSnapshot, loadMineflayerPlugins } from "../bots";
 import type { ExplorerLimiter, LockManager, SkillLimiter } from "../coordination";
 import { ActionHistoryBuffer } from "./history-buffer";
+import { buildLocalActivityPlan } from "./local-activity-plan";
 import type { PlannerTrigger, RuntimeSubgoal, RuntimeTaskState } from "./types";
 import { enforceSubgoalPrerequisites, type BlueprintDesigner, type PlannerService } from "../planner";
 import { nowIso } from "../utils/time";
@@ -79,6 +80,8 @@ export class BotController {
 
   private lastAlwaysActiveAtMs = 0;
 
+  private lastTaskEventChatAtMs = 0;
+
   constructor(botId: string, deps: BotControllerDependencies) {
     this.botId = botId;
     this.deps = deps;
@@ -126,25 +129,120 @@ export class BotController {
     }
   }
 
+  private subgoalSummary(subgoal: RuntimeSubgoal | PlannerSubgoal): string {
+    const params = subgoal.params ?? {};
+    switch (subgoal.name) {
+      case "goto": {
+        const x = Math.round(Number(params.x ?? 0));
+        const y = Math.round(Number(params.y ?? 0));
+        const z = Math.round(Number(params.z ?? 0));
+        const range = Number(params.range ?? 2);
+        return `goto x:${x} y:${y} z:${z} r:${range}`;
+      }
+      case "goto_nearest": {
+        const target = String(
+          params.block ?? params.resource ?? params.resource_type ?? params.type ?? "unknown"
+        );
+        const maxDistance = Number(params.max_distance ?? 48);
+        return `goto_nearest ${target} d:${maxDistance}`;
+      }
+      case "collect": {
+        const target = String(
+          params.item ??
+            params.block ??
+            params.resource ??
+            params.resource_type ??
+            params.type ??
+            "unknown"
+        );
+        const count = Number(params.count ?? params.amount ?? params.qty ?? 1);
+        return `collect ${target} x${count}`;
+      }
+      case "craft": {
+        const item = String(params.item ?? params.output ?? params.result ?? params.type ?? "unknown");
+        const count = Number(params.count ?? params.amount ?? params.qty ?? 1);
+        return `craft ${item} x${count}`;
+      }
+      case "smelt": {
+        const input = String(params.input ?? params.item ?? params.type ?? "unknown");
+        const count = Number(params.count ?? params.amount ?? params.qty ?? 1);
+        return `smelt ${input} x${count}`;
+      }
+      case "deposit": {
+        const strategy = String(params.strategy ?? "all_non_essential");
+        return `deposit ${strategy}`;
+      }
+      case "withdraw": {
+        const item = String(params.item ?? params.type ?? params.resource ?? "unknown");
+        const count = Number(params.count ?? params.amount ?? params.qty ?? 1);
+        return `withdraw ${item} x${count}`;
+      }
+      case "build_blueprint": {
+        const blueprintName = String(params.blueprint_name ?? "generated");
+        return `build ${blueprintName}`;
+      }
+      case "explore": {
+        const radius = Number(params.radius ?? 28);
+        const returnToBase = Boolean(params.return_to_base ?? false);
+        return `explore r:${radius} return:${returnToBase ? "yes" : "no"}`;
+      }
+      case "combat_engage": {
+        const maxTargets = Number(params.max_targets ?? 1);
+        const maxDistance = Number(params.max_distance ?? 18);
+        return `combat_engage targets:${maxTargets} d:${maxDistance}`;
+      }
+      case "combat_guard": {
+        const radius = Number(params.radius ?? 12);
+        const durationMs = Number(params.duration_ms ?? 6000);
+        return `combat_guard r:${radius} t:${Math.round(durationMs / 1000)}s`;
+      }
+      default:
+        return subgoal.name;
+    }
+  }
+
   taskSummary(): string {
     if (!this.connected) {
       return "offline";
     }
 
-    if (this.taskState.currentSubgoal?.name) {
-      return this.taskState.currentSubgoal.name;
+    if (this.taskState.currentSubgoal) {
+      return `active ${this.subgoalSummary(this.taskState.currentSubgoal)}`;
     }
 
-    const queued = this.taskState.queue[0]?.name;
+    const queued = this.taskState.queue[0];
     if (queued) {
-      return `queued:${queued}`;
+      return `queued ${this.subgoalSummary(queued)}`;
     }
 
     if (this.taskState.currentGoal) {
-      return `goal:${this.taskState.currentGoal.slice(0, 20)}`;
+      return `goal ${this.taskState.currentGoal.slice(0, 36)}`;
     }
 
     return "idle";
+  }
+
+  private shortenForChat(value: string, maxLength = 80): string {
+    if (value.length <= maxLength) {
+      return value;
+    }
+    return `${value.slice(0, maxLength - 3)}...`;
+  }
+
+  private maybeChatTaskEvent(message: string, force = false): void {
+    if (!this.deps.config.CHAT_TASK_EVENTS_ENABLED) {
+      return;
+    }
+    if (!this.canChat()) {
+      return;
+    }
+
+    const nowMs = Date.now();
+    if (!force && nowMs - this.lastTaskEventChatAtMs < this.deps.config.CHAT_TASK_EVENT_MIN_MS) {
+      return;
+    }
+    this.lastTaskEventChatAtMs = nowMs;
+    this.chat(message.slice(0, 240));
   }
 
   async start(): Promise<void> {
@@ -270,9 +368,27 @@ export class BotController {
     this.disconnectStreak += 1;
     this.connected = false;
     this.reconnectPending = true;
+    const interruptedSubgoal = this.taskState.currentSubgoal;
     this.taskState.busy = false;
-    this.taskState.queue = [];
     this.taskState.currentSubgoal = null;
+
+    if (
+      interruptedSubgoal &&
+      interruptedSubgoal.retryCount < this.deps.config.SUBGOAL_RETRY_LIMIT
+    ) {
+      this.taskState.queue.unshift({
+        ...interruptedSubgoal,
+        id: makeId(`subgoal_${this.botId}`),
+        assignedAt: nowIso(),
+        retryCount: interruptedSubgoal.retryCount + 1
+      });
+      this.log("SUBGOAL_INTERRUPTED_REQUEUED", {
+        subgoal: interruptedSubgoal.name,
+        retry_count: interruptedSubgoal.retryCount + 1,
+        reason
+      });
+    }
+
     this.pushTrigger("RECONNECT", { reason: `scheduled_${reason}` });
     this.deps.metrics.recordReconnect(this.botId);
     const timeoutRelated = detail?.includes("disconnect.timeout") || detail?.includes("Timed out");
@@ -316,7 +432,7 @@ export class BotController {
       this.taskState.pendingTriggers.push(trigger);
     }
 
-    if (trigger === "DEATH" || trigger === "STUCK") {
+    if (trigger === "DEATH") {
       this.taskState.queue = [];
     }
 
@@ -366,6 +482,9 @@ export class BotController {
     if (!this.deps.config.ALWAYS_ACTIVE_MODE || !this.bot) {
       return;
     }
+    if (this.plannerInFlight) {
+      return;
+    }
     if (this.taskState.busy || this.taskState.queue.length > 0) {
       return;
     }
@@ -373,39 +492,28 @@ export class BotController {
       return;
     }
 
-    const position = this.bot.entity?.position;
-    if (!position) {
+    const snapshot = this.refreshSnapshot(nowMs, false);
+    if (!snapshot) {
       return;
     }
 
-    const angle = Math.random() * Math.PI * 2;
-    const distance = 8 + Math.random() * 10;
-    const targetX = Math.round(position.x + Math.cos(angle) * distance);
-    const targetZ = Math.round(position.z + Math.sin(angle) * distance);
-    const targetY = Math.round(position.y);
+    const localPlan = buildLocalActivityPlan(snapshot, this.deps.config.MC_VERSION);
+    if (localPlan.subgoals.length === 0) {
+      return;
+    }
 
-    this.taskState.queue = [
-      this.runtimeSubgoal({
-        name: "goto",
-        params: {
-          x: targetX,
-          y: targetY,
-          z: targetZ,
-          range: 2
-        },
-        success_criteria: {
-          within_range: 2
-        }
-      })
-    ];
+    this.taskState.queue = localPlan.subgoals.map((subgoal) => this.runtimeSubgoal(subgoal));
     this.lastAlwaysActiveAtMs = nowMs;
 
     this.log("ALWAYS_ACTIVE_ENQUEUED", {
-      subgoal: "goto",
-      x: targetX,
-      y: targetY,
-      z: targetZ
+      reason: localPlan.reason,
+      subgoals: localPlan.subgoals.map((subgoal) => subgoal.name)
     });
+    this.maybeChatTaskEvent(
+      `[task] ${this.botId} local ${localPlan.reason} -> ${localPlan.subgoals
+        .map((subgoal) => this.subgoalSummary(subgoal))
+        .join(" ; ")}`
+    );
   }
 
   private refreshSnapshot(nowMs: number, force: boolean): SnapshotV1 | null {
@@ -471,15 +579,32 @@ export class BotController {
 
       this.deps.metrics.recordLlmCall(this.botId, outcome.status);
       this.taskState.currentGoal = outcome.response.next_goal;
+      if (outcome.notes && outcome.notes.length > 0) {
+        this.log("PLANNER_NORMALIZED", {
+          notes: outcome.notes
+        });
+      }
       const materializedSubgoals = await this.materializeBuildSubgoals(
         snapshot,
         outcome.response.next_goal,
         outcome.response.subgoals
       );
-      const guarded = enforceSubgoalPrerequisites(snapshot, materializedSubgoals);
+      const guarded = enforceSubgoalPrerequisites(
+        snapshot,
+        materializedSubgoals,
+        this.deps.config.MC_VERSION
+      );
       this.taskState.queue = guarded.subgoals.map((subgoal) => this.runtimeSubgoal(subgoal));
       this.taskState.pendingTriggers = [];
       this.lastPlanAt = Date.now();
+      this.maybeChatTaskEvent(
+        `[plan] ${this.botId} ${this.shortenForChat(
+          this.taskState.currentGoal ?? "goal"
+        )} -> ${this.taskState.queue
+          .slice(0, 3)
+          .map((subgoal) => this.subgoalSummary(subgoal))
+          .join(" ; ")}`
+      );
 
       if (guarded.notes.length > 0) {
         this.log("PLANNER_GUARD_APPLIED", {
@@ -542,6 +667,7 @@ export class BotController {
       subgoal: subgoal.name,
       params: subgoal.params
     });
+    this.maybeChatTaskEvent(`[task] ${this.botId} start ${this.subgoalSummary(subgoal)}`);
 
     try {
       const result = await this.deps.skillEngine.execute(
@@ -595,8 +721,25 @@ export class BotController {
           code: result.errorCode,
           details: result.details
         };
-        this.taskState.plannerCooldownUntil = Date.now() + this.deps.config.PLANNER_COOLDOWN_MS;
-        this.taskState.pendingTriggers = ["SUBGOAL_FAILED"];
+        const retryable = result.retryable !== false;
+        const retryCount = subgoal.retryCount ?? 0;
+        if (retryable && retryCount < this.deps.config.SUBGOAL_RETRY_LIMIT) {
+          const retrySubgoal: RuntimeSubgoal = {
+            ...subgoal,
+            id: makeId(`subgoal_${this.botId}`),
+            assignedAt: nowIso(),
+            retryCount: retryCount + 1
+          };
+          this.taskState.queue.unshift(retrySubgoal);
+          this.log("SUBGOAL_REQUEUED", {
+            subgoal: subgoal.name,
+            retry_count: retrySubgoal.retryCount,
+            error_code: result.errorCode
+          });
+        } else {
+          this.taskState.plannerCooldownUntil = Date.now() + this.deps.config.PLANNER_COOLDOWN_MS;
+          this.taskState.pendingTriggers = ["SUBGOAL_FAILED"];
+        }
         this.deps.metrics.recordFailure(this.botId, result.errorCode);
       } else {
         this.taskState.progressCounters[subgoal.name] =
@@ -611,6 +754,17 @@ export class BotController {
         result,
         queue_remaining: this.taskState.queue.length
       });
+      if (result.outcome === "SUCCESS") {
+        this.maybeChatTaskEvent(
+          `[task] ${this.botId} done ${this.subgoalSummary(subgoal)} in ${Math.round(durationMs / 1000)}s`
+        );
+      } else {
+        this.maybeChatTaskEvent(
+          `[task] ${this.botId} fail ${this.subgoalSummary(subgoal)} (${result.errorCode}) ${this.shortenForChat(
+            result.details
+          )}`
+        );
+      }
     } finally {
       this.taskState.currentSubgoal = null;
       this.taskState.busy = false;
@@ -622,7 +776,8 @@ export class BotController {
     return {
       ...subgoal,
       id: makeId(`subgoal_${this.botId}`),
-      assignedAt: nowIso()
+      assignedAt: nowIso(),
+      retryCount: 0
     };
   }
 

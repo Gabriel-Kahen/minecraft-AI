@@ -5,3 +5,4 @@ export * from "./planner-service";
 export * from "./rate-limiter";
 export * from "./schema-validator";
 export * from "./subgoal-guard";
+export * from "./subgoal-normalizer";

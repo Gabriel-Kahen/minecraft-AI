@@ -23,11 +23,17 @@ const envSchema = z.object({
     .optional()
     .transform((value) => value !== "false"),
   ALWAYS_ACTIVE_REQUEUE_MS: z.coerce.number().int().min(500).default(2500),
+  SUBGOAL_RETRY_LIMIT: z.coerce.number().int().min(0).max(5).default(2),
   CHAT_STATUS_ENABLED: z
     .string()
     .optional()
     .transform((value) => value !== "false"),
   CHAT_STATUS_INTERVAL_MS: z.coerce.number().int().min(5000).default(10000),
+  CHAT_TASK_EVENTS_ENABLED: z
+    .string()
+    .optional()
+    .transform((value) => value !== "false"),
+  CHAT_TASK_EVENT_MIN_MS: z.coerce.number().int().min(250).default(1200),
   LLM_HISTORY_LIMIT: z.coerce.number().int().min(1).max(30).default(20),
   PLANNER_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).default(6000),
   PLANNER_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(2),

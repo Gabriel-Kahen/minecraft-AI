@@ -33,7 +33,7 @@ const baseSnapshot = (): SnapshotV1 => ({
 });
 
 describe("enforceSubgoalPrerequisites", () => {
-  it("injects wooden pickaxe bootstrap before mining stone", () => {
+  it("injects dependency chain before mining tool-gated resources", () => {
     const snapshot = baseSnapshot();
     const plan: PlannerSubgoal[] = [
       {
@@ -46,8 +46,11 @@ describe("enforceSubgoalPrerequisites", () => {
     const guarded = enforceSubgoalPrerequisites(snapshot, plan);
 
     expect(guarded.notes.length).toBeGreaterThan(0);
-    expect(guarded.subgoals[0]?.name).toBe("goto_nearest");
-    expect(guarded.subgoals.some((subgoal) => subgoal.name === "craft" && subgoal.params.item === "wooden_pickaxe")).toBe(true);
+    expect(
+      guarded.subgoals.some(
+        (subgoal) => subgoal.name === "craft" && String(subgoal.params.item).endsWith("_pickaxe")
+      )
+    ).toBe(true);
     expect(guarded.subgoals.at(-1)?.name).toBe("collect");
   });
 

@@ -61,6 +61,7 @@ const bootstrap = async (): Promise<void> => {
   const planner = new PlannerService(client, validator, limiter, {
     timeoutMs: config.PLANNER_TIMEOUT_MS,
     maxRetries: config.PLANNER_MAX_RETRIES,
+    mcVersion: config.MC_VERSION,
     basePosition: {
       x: config.BASE_X,
       y: config.BASE_Y,

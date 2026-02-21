@@ -4,6 +4,7 @@ import { buildFallbackPlan, type BasePosition } from "./fallback-planner";
 import { VertexGeminiClient } from "./gemini-client";
 import { PlannerRateLimiter } from "./rate-limiter";
 import { SchemaValidator } from "./schema-validator";
+import { normalizePlannerSubgoals } from "./subgoal-normalizer";
 import { sleep, withJitter } from "../utils/time";
 
 export interface PlannerResult {
@@ -11,12 +12,14 @@ export interface PlannerResult {
   status: "SUCCESS" | "RATE_LIMITED" | "FALLBACK";
   tokensIn?: number;
   tokensOut?: number;
+  notes?: string[];
 }
 
 export interface PlannerServiceOptions {
   timeoutMs: number;
   maxRetries: number;
   basePosition: BasePosition;
+  mcVersion: string;
 }
 
 const extractJson = (text: string): string => {
@@ -42,6 +45,7 @@ const extractJson = (text: string): string => {
 const buildPrompt = (request: PlannerRequestV1): string => {
   return [
     "You are a Minecraft planner for a headless execution system.",
+    "Each bot is an independent player. Do not assign static team roles.",
     "Return JSON only and strictly match this shape:",
     '{"next_goal": string, "subgoals": [{"name": string, "params": object, "success_criteria": object, "risk_flags"?: string[], "constraints"?: object}], "risk_flags"?: string[], "constraints"?: object}',
     `Allowed subgoal names: ${SUBGOAL_NAMES.join(", ")}`,
@@ -50,6 +54,10 @@ const buildPrompt = (request: PlannerRequestV1): string => {
     "- goto_nearest: use params.block OR params.resource",
     "- craft/withdraw: use params.item and params.count",
     "- smelt: use params.input, optional params.fuel, and params.count",
+    "Progression rules:",
+    "- Respect tool and recipe dependencies implied by the current inventory and world state.",
+    "- If an action needs prerequisites, include prerequisite subgoals first.",
+    "- Prefer 2-4 coherent subgoals that continue one mission to completion.",
     "Use short deterministic subgoals (max 4), keep params concrete and executable.",
     "For any construction intent, use build_blueprint. Do not reference stock templates or hardcoded blueprint files.",
     "Request payload:",
@@ -92,7 +100,8 @@ export class PlannerService {
         response: buildFallbackPlan(
           request.snapshot,
           `RATE_LIMIT_${budget.reason ?? "UNKNOWN"}`,
-          this.options.basePosition
+          this.options.basePosition,
+          this.options.mcVersion
         )
       };
     }
@@ -103,13 +112,24 @@ export class PlannerService {
     for (let attempt = 0; attempt <= this.options.maxRetries; attempt += 1) {
       try {
         const completion = await this.client.generateJson(prompt, this.options.timeoutMs);
-        const payload = JSON.parse(extractJson(completion.text)) as PlannerResponseV1;
-        this.validator.validatePlannerResponse(payload);
+        const parsed = JSON.parse(extractJson(completion.text)) as PlannerResponseV1;
+        this.validator.validatePlannerResponse(parsed);
+        const normalized = normalizePlannerSubgoals(parsed.subgoals);
+        if (normalized.subgoals.length === 0) {
+          throw new Error("planner produced no executable subgoals");
+        }
+
+        const payload: PlannerResponseV1 = {
+          ...parsed,
+          subgoals: normalized.subgoals
+        };
+
         return {
           status: "SUCCESS",
           response: payload,
           tokensIn: completion.usage.tokensIn,
-          tokensOut: completion.usage.tokensOut
+          tokensOut: completion.usage.tokensOut,
+          notes: normalized.notes
         };
       } catch (error) {
         lastError = error;
@@ -125,7 +145,8 @@ export class PlannerService {
       response: buildFallbackPlan(
         request.snapshot,
         `PLANNER_ERROR:${lastError instanceof Error ? lastError.message : "unknown"}`,
-        this.options.basePosition
+        this.options.basePosition,
+        this.options.mcVersion
       )
     };
   }

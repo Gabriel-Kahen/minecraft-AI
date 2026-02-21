@@ -20,6 +20,7 @@ import { SkillEngine } from "../skills";
 import type { AppConfig } from "../config";
 
 const reconnectDelayMs = (): number => 7000 + Math.floor(Math.random() * 2500);
+const snapshotRefreshMs = 3000;
 
 const formatDisconnectReason = (reason: unknown): string => {
   if (typeof reason === "string") {
@@ -71,6 +72,10 @@ export class BotController {
   private lastPlanAt = 0;
 
   private plannerInFlight = false;
+
+  private lastSnapshot: SnapshotV1 | null = null;
+
+  private lastSnapshotAtMs = 0;
 
   constructor(botId: string, deps: BotControllerDependencies) {
     this.botId = botId;
@@ -279,8 +284,11 @@ export class BotController {
       return;
     }
 
-    const snapshot = buildSnapshot(this.bot, this.botId, this.taskState);
-    this.deps.store.upsertBotSnapshot(this.botId, snapshot, nowIso());
+    const now = Date.now();
+    const snapshot = this.refreshSnapshot(now, false);
+    if (!snapshot) {
+      return;
+    }
 
     if (this.taskState.busy) {
       return;
@@ -291,7 +299,6 @@ export class BotController {
       return;
     }
 
-    const now = Date.now();
     if (now - this.lastPlanAt > 10000 && !this.taskState.pendingTriggers.includes("IDLE")) {
       this.taskState.pendingTriggers.push("IDLE");
     }
@@ -300,7 +307,35 @@ export class BotController {
       this.taskState.pendingTriggers.length > 0 && now >= this.taskState.plannerCooldownUntil;
 
     if (shouldPlan && !this.plannerInFlight) {
-      await this.requestPlan(snapshot);
+      const freshSnapshot = this.refreshSnapshot(Date.now(), true);
+      if (!freshSnapshot) {
+        return;
+      }
+      await this.requestPlan(freshSnapshot);
+    }
+  }
+
+  private refreshSnapshot(nowMs: number, force: boolean): SnapshotV1 | null {
+    if (!force && this.lastSnapshot && nowMs - this.lastSnapshotAtMs < snapshotRefreshMs) {
+      return this.lastSnapshot;
+    }
+
+    if (!this.bot) {
+      return null;
+    }
+
+    try {
+      const snapshot = buildSnapshot(this.bot, this.botId, this.taskState);
+      this.lastSnapshot = snapshot;
+      this.lastSnapshotAtMs = nowMs;
+      this.deps.store.upsertBotSnapshot(this.botId, snapshot, nowIso());
+      return snapshot;
+    } catch (error) {
+      this.log("INCIDENT", {
+        category: "snapshot",
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return this.lastSnapshot;
     }
   }
 

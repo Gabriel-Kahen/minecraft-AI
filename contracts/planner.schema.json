@@ -97,9 +97,6 @@
         "success_criteria": {
           "type": "object"
         },
-        "role_suggestion": {
-          "type": ["string", "null"]
-        },
         "risk_flags": {
           "type": "array",
           "items": { "type": "string" }
@@ -134,9 +131,6 @@
             "$ref": "#/$defs/SubgoalName"
           },
           "minItems": 1
-        },
-        "role_hint": {
-          "type": ["string", "null"]
         }
       }
     },
@@ -156,9 +150,6 @@
           "items": {
             "$ref": "#/$defs/Subgoal"
           }
-        },
-        "role_suggestion": {
-          "type": ["string", "null"]
         },
         "risk_flags": {
           "type": "array",

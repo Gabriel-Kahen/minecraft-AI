@@ -10,7 +10,7 @@ import type { MetricsService } from "../observability";
 import { buildSnapshot, loadMineflayerPlugins } from "../bots";
 import type { ExplorerLimiter, LockManager } from "../coordination";
 import { ActionHistoryBuffer } from "./history-buffer";
-import type { BotRole, PlannerTrigger, RuntimeSubgoal, RuntimeTaskState } from "./types";
+import type { PlannerTrigger, RuntimeSubgoal, RuntimeTaskState } from "./types";
 import type { BlueprintDesigner, PlannerService } from "../planner";
 import { nowIso } from "../utils/time";
 import { makeId } from "../utils/id";
@@ -18,6 +18,21 @@ import type { SQLiteStore, JsonlLogger } from "../store";
 import { ReflexManager } from "../reflex";
 import { SkillEngine } from "../skills";
 import type { AppConfig } from "../config";
+
+const reconnectDelayMs = (): number => 7000 + Math.floor(Math.random() * 2500);
+
+const formatDisconnectReason = (reason: unknown): string => {
+  if (typeof reason === "string") {
+    return reason;
+  }
+
+  try {
+    const json = JSON.stringify(reason);
+    return json ?? String(reason);
+  } catch {
+    return String(reason);
+  }
+};
 
 export interface BotControllerDependencies {
   config: AppConfig;
@@ -34,8 +49,6 @@ export interface BotControllerDependencies {
 
 export class BotController {
   private readonly botId: string;
-
-  private readonly role: BotRole;
 
   private readonly deps: BotControllerDependencies;
 
@@ -59,9 +72,8 @@ export class BotController {
 
   private plannerInFlight = false;
 
-  constructor(botId: string, role: BotRole, deps: BotControllerDependencies) {
+  constructor(botId: string, deps: BotControllerDependencies) {
     this.botId = botId;
-    this.role = role;
     this.deps = deps;
     this.history = new ActionHistoryBuffer(deps.config.LLM_HISTORY_LIMIT);
     this.taskState = {
@@ -70,7 +82,6 @@ export class BotController {
       queue: [],
       progressCounters: {},
       lastError: null,
-      role,
       busy: false,
       plannerCooldownUntil: 0,
       pendingTriggers: ["IDLE"],
@@ -94,7 +105,7 @@ export class BotController {
 
   async start(): Promise<void> {
     this.stopped = false;
-    this.deps.store.upsertBot(this.botId, this.role, nowIso());
+    this.deps.store.upsertBot(this.botId, nowIso());
     await this.connect();
 
     this.loopTimer = setInterval(() => {
@@ -130,7 +141,7 @@ export class BotController {
   }
 
   private async connect(): Promise<void> {
-    if (this.stopped || this.reconnectPending) {
+    if (this.stopped || this.reconnectPending || this.connected) {
       return;
     }
 
@@ -153,8 +164,11 @@ export class BotController {
     });
 
     bot.once("spawn", () => {
+      if (this.bot !== bot || this.stopped) {
+        return;
+      }
       this.connected = true;
-      this.log("CONNECTED", { role: this.role });
+      this.log("CONNECTED", {});
       this.reflexManager.attach(bot, {
         isBusy: () => this.taskState.busy,
         onTrigger: (trigger, details) => this.pushTrigger(trigger, details)
@@ -162,6 +176,9 @@ export class BotController {
     });
 
     bot.on("error", (error: unknown) => {
+      if (this.bot !== bot || this.stopped) {
+        return;
+      }
       this.log("INCIDENT", {
         category: "bot_error",
         error: error instanceof Error ? error.message : String(error)
@@ -169,22 +186,29 @@ export class BotController {
     });
 
     bot.on("kicked", (reason: unknown) => {
+      if (this.bot !== bot || this.stopped) {
+        return;
+      }
       this.log("DISCONNECTED", {
-        reason: String(reason)
+        reason: formatDisconnectReason(reason)
       });
-      this.connected = false;
-      this.scheduleReconnect();
+      this.scheduleReconnect(bot, "kicked");
     });
 
     bot.on("end", () => {
+      if (this.bot !== bot || this.stopped) {
+        return;
+      }
       this.log("DISCONNECTED", {
         reason: "connection_end"
       });
-      this.connected = false;
-      this.scheduleReconnect();
+      this.scheduleReconnect(bot, "end");
     });
 
     bot.on("death", () => {
+      if (this.bot !== bot || this.stopped) {
+        return;
+      }
       this.taskState.queue = [];
       this.taskState.currentSubgoal = null;
       this.taskState.currentGoal = "recover_from_death";
@@ -192,19 +216,39 @@ export class BotController {
     });
   }
 
-  private scheduleReconnect(): void {
-    if (this.reconnectPending || this.stopped) {
+  private scheduleReconnect(sourceBot: any, reason: "kicked" | "end"): void {
+    if (this.reconnectPending || this.stopped || this.bot !== sourceBot) {
       return;
     }
 
+    this.connected = false;
     this.reconnectPending = true;
     this.taskState.busy = false;
     this.taskState.queue = [];
     this.taskState.currentSubgoal = null;
-    this.pushTrigger("RECONNECT", { reason: "scheduled" });
+    this.pushTrigger("RECONNECT", { reason: `scheduled_${reason}` });
     this.deps.metrics.recordReconnect(this.botId);
+    const delayMs = reconnectDelayMs();
 
     setTimeout(() => {
+      if (this.stopped) {
+        this.reconnectPending = false;
+        return;
+      }
+
+      if (this.bot !== sourceBot) {
+        this.reconnectPending = false;
+        return;
+      }
+
+      this.reflexManager.detach();
+      try {
+        sourceBot.removeAllListeners();
+        sourceBot.quit("reconnect");
+      } catch {
+        // ignore cleanup errors
+      }
+      this.bot = null;
       this.reconnectPending = false;
       this.connect().catch((error) => {
         this.log("INCIDENT", {
@@ -212,7 +256,7 @@ export class BotController {
           error: error instanceof Error ? error.message : String(error)
         });
       });
-    }, 3500).unref();
+    }, delayMs).unref();
   }
 
   private pushTrigger(trigger: PlannerTrigger, details: Record<string, unknown>): void {
@@ -268,8 +312,7 @@ export class BotController {
       bot_id: this.botId,
       snapshot,
       history: this.history.snapshot(),
-      available_subgoals: [...SUBGOAL_NAMES],
-      role_hint: this.role
+      available_subgoals: [...SUBGOAL_NAMES]
     };
 
     try {
@@ -439,7 +482,6 @@ export class BotController {
 
       const design = await this.deps.blueprintDesigner.designAndPersist({
         botId: this.botId,
-        role: this.role,
         nextGoal,
         subgoal,
         snapshot

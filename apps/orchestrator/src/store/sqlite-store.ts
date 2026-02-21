@@ -22,7 +22,6 @@ export class SQLiteStore {
 
       CREATE TABLE IF NOT EXISTS bots (
         id TEXT PRIMARY KEY,
-        role TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
 
@@ -84,6 +83,8 @@ export class SQLiteStore {
       CREATE INDEX IF NOT EXISTS idx_llm_calls_bot_time ON llm_calls(bot_id, started_at);
       CREATE INDEX IF NOT EXISTS idx_locks_key_time ON locks(resource_key, ts);
     `);
+
+    this.migrateLegacyBotsRoleColumn();
   }
 
   insertRun(id: string, startedAt: string, config: Record<string, unknown>): void {
@@ -92,16 +93,16 @@ export class SQLiteStore {
       .run(id, startedAt, JSON.stringify(config));
   }
 
-  upsertBot(botId: string, role: string, createdAt: string): void {
+  upsertBot(botId: string, createdAt: string): void {
     this.db
       .prepare(
         `
-          INSERT INTO bots (id, role, created_at)
-          VALUES (?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET role=excluded.role
+          INSERT INTO bots (id, created_at)
+          VALUES (?, ?)
+          ON CONFLICT(id) DO NOTHING
         `
       )
-      .run(botId, role, createdAt);
+      .run(botId, createdAt);
   }
 
   upsertBotSnapshot(botId: string, snapshot: SnapshotV1, updatedAt: string): void {
@@ -195,5 +196,32 @@ export class SQLiteStore {
 
   close(): void {
     this.db.close();
+  }
+
+  private migrateLegacyBotsRoleColumn(): void {
+    const columns = this.db
+      .prepare("PRAGMA table_info(bots)")
+      .all() as Array<{ name: string }>;
+    const hasRoleColumn = columns.some((column) => column.name === "role");
+    if (!hasRoleColumn) {
+      return;
+    }
+
+    this.db.exec(`
+      PRAGMA foreign_keys = OFF;
+
+      CREATE TABLE IF NOT EXISTS bots_next (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL
+      );
+
+      INSERT OR REPLACE INTO bots_next (id, created_at)
+      SELECT id, created_at FROM bots;
+
+      DROP TABLE bots;
+      ALTER TABLE bots_next RENAME TO bots;
+
+      PRAGMA foreign_keys = ON;
+    `);
   }
 }

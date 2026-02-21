@@ -21,7 +21,6 @@ export interface GeneratedBlueprint {
 
 export interface BlueprintDesignRequest {
   botId: string;
-  role: string;
   nextGoal: string;
   subgoal: PlannerSubgoal;
   snapshot: SnapshotV1;
@@ -186,7 +185,7 @@ const buildPrompt = (
   options: Pick<BlueprintDesignerOptions, "maxBlocks" | "maxSpan" | "maxHeight">
 ): string => {
   return [
-    "You design Minecraft build blueprints for a deterministic builder bot.",
+    "You design Minecraft build blueprints for a deterministic agent.",
     "Return JSON only with this exact shape:",
     '{"name": string, "description": string, "blocks": [{"x": integer, "y": integer, "z": integer, "block": string}]}',
     "Coordinates are relative offsets from anchor (0,0,0).",
@@ -197,7 +196,6 @@ const buildPrompt = (
     "Build request:",
     JSON.stringify({
       bot_id: request.botId,
-      role: request.role,
       next_goal: request.nextGoal,
       build_subgoal: request.subgoal,
       snapshot: {

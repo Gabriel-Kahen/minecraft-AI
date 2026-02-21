@@ -5,13 +5,11 @@ import { nowIso, sleep } from "../utils/time";
 import type { JsonlLogger, SQLiteStore } from "../store";
 import {
   ExplorerLimiter,
-  LockManager,
-  roleForBotIndex
+  LockManager
 } from "../coordination";
 import { SkillEngine } from "../skills";
 import { BotController, type BotControllerDependencies } from "./bot-controller";
 import type { BlueprintDesigner, PlannerService } from "../planner";
-import type { BotRole } from "./types";
 
 export interface OrchestratorDependencies {
   config: AppConfig;
@@ -64,9 +62,8 @@ export class Orchestrator {
     };
 
     for (let index = 0; index < this.deps.config.BOT_COUNT; index += 1) {
-      const role = roleForBotIndex(index);
       const botId = `${this.deps.config.BOT_USERNAME_PREFIX}-${index + 1}`;
-      const controller = new BotController(botId, role as BotRole, {
+      const controller = new BotController(botId, {
         ...shared,
         blueprintRoot: this.deps.config.BLUEPRINT_DIR
       });

@@ -13,8 +13,6 @@ export type PlannerTrigger =
   | "TOOL_MISSING"
   | "RECONNECT";
 
-export type BotRole = "lumber" | "miner" | "builder" | "scout" | "hauler_guard";
-
 export interface RuntimeSubgoal extends PlannerSubgoal {
   id: string;
   assignedAt: string;
@@ -29,7 +27,6 @@ export interface RuntimeTaskState {
     code: FailureCode;
     details: string;
   } | null;
-  role: BotRole;
   busy: boolean;
   plannerCooldownUntil: number;
   pendingTriggers: PlannerTrigger[];

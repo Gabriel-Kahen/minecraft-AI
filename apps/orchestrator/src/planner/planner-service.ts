@@ -43,7 +43,7 @@ const buildPrompt = (request: PlannerRequestV1): string => {
   return [
     "You are a Minecraft planner for a headless execution system.",
     "Return JSON only and strictly match this shape:",
-    '{"next_goal": string, "subgoals": [{"name": string, "params": object, "success_criteria": object, "role_suggestion"?: string|null, "risk_flags"?: string[], "constraints"?: object}], "role_suggestion"?: string|null, "risk_flags"?: string[], "constraints"?: object}',
+    '{"next_goal": string, "subgoals": [{"name": string, "params": object, "success_criteria": object, "risk_flags"?: string[], "constraints"?: object}], "risk_flags"?: string[], "constraints"?: object}',
     `Allowed subgoal names: ${SUBGOAL_NAMES.join(", ")}`,
     "Use short deterministic subgoals (max 4), keep params concrete and executable.",
     "For any construction intent, use build_blueprint. Do not reference stock templates or hardcoded blueprint files.",

@@ -17,7 +17,7 @@ const envSchema = z.object({
   BOT_START_STAGGER_MS: z.coerce.number().int().min(0).default(2500),
   RECONNECT_BASE_DELAY_MS: z.coerce.number().int().min(1000).default(12000),
   RECONNECT_JITTER_MS: z.coerce.number().int().min(0).default(8000),
-  MAX_CONCURRENT_SKILLS: z.coerce.number().int().min(1).max(5).default(2),
+  MAX_CONCURRENT_SKILLS: z.coerce.number().int().min(1).max(5).default(1),
   LLM_HISTORY_LIMIT: z.coerce.number().int().min(1).max(30).default(20),
   PLANNER_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).default(6000),
   PLANNER_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(2),

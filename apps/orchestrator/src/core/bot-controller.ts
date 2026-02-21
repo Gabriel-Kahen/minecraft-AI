@@ -293,10 +293,6 @@ export class BotController {
     }
 
     const now = Date.now();
-    const snapshot = this.refreshSnapshot(now, false);
-    if (!snapshot) {
-      return;
-    }
 
     if (this.taskState.busy) {
       return;
@@ -315,7 +311,7 @@ export class BotController {
       this.taskState.pendingTriggers.length > 0 && now >= this.taskState.plannerCooldownUntil;
 
     if (shouldPlan && !this.plannerInFlight) {
-      const freshSnapshot = this.refreshSnapshot(Date.now(), true);
+      const freshSnapshot = this.refreshSnapshot(now, true);
       if (!freshSnapshot) {
         return;
       }

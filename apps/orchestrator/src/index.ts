@@ -76,6 +76,8 @@ const bootstrap = async (): Promise<void> => {
   const planner = new PlannerService(client, validator, limiter, {
     timeoutMs: config.PLANNER_TIMEOUT_MS,
     maxRetries: config.PLANNER_MAX_RETRIES,
+    feasibilityRepromptEnabled: config.PLANNER_FEASIBILITY_REPROMPT_ENABLED,
+    feasibilityRepromptMaxAttempts: config.PLANNER_FEASIBILITY_REPROMPT_MAX_ATTEMPTS,
     mcVersion: config.MC_VERSION,
     basePosition: {
       x: config.BASE_X,

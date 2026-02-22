@@ -75,6 +75,11 @@ const envSchema = z.object({
   LLM_HISTORY_LIMIT: z.coerce.number().int().min(1).max(30).default(20),
   PLANNER_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).default(3000),
   PLANNER_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(0),
+  PLANNER_FEASIBILITY_REPROMPT_ENABLED: z
+    .unknown()
+    .optional()
+    .transform((value) => parseBoolean(value, true)),
+  PLANNER_FEASIBILITY_REPROMPT_MAX_ATTEMPTS: z.coerce.number().int().min(0).max(3).default(1),
   GEMINI_PROJECT_ID: z.string().min(1),
   GEMINI_LOCATION: z.string().default("us-central1"),
   GEMINI_MODEL: z.string().default("gemini-2.0-flash-lite"),
@@ -99,6 +104,13 @@ const envSchema = z.object({
   LOCK_LEASE_MS: z.coerce.number().int().min(1000).default(45000),
   LOCK_HEARTBEAT_MS: z.coerce.number().int().min(1000).default(12000),
   PLANNER_COOLDOWN_MS: z.coerce.number().int().min(250).default(750),
+  PLAN_PREFETCH_ENABLED: z
+    .unknown()
+    .optional()
+    .transform((value) => parseBoolean(value, true)),
+  PLAN_PREFETCH_MIN_INTERVAL_MS: z.coerce.number().int().min(100).default(2500),
+  PLAN_PREFETCH_MAX_AGE_MS: z.coerce.number().int().min(1000).default(30000),
+  PLAN_PREFETCH_RESERVE_CALLS: z.coerce.number().int().min(0).default(4),
   BASE_X: z.coerce.number().default(0),
   BASE_Y: z.coerce.number().default(64),
   BASE_Z: z.coerce.number().default(0),

@@ -146,7 +146,7 @@ export class ReflexManager {
           this.lastPos = { x: position.x, y: position.y, z: position.z };
         }
 
-        if (this.stuckCounter >= 20) {
+        if (this.stuckCounter >= 8) {
           this.stuckCounter = 0;
           context.onTrigger("STUCK", { reason: "movement_threshold" });
         }

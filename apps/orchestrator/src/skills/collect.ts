@@ -102,6 +102,14 @@ const positionKey = (position: any): string =>
     Number(position?.z ?? 0)
   )}`;
 
+const incrementFailureCount = (counts: Map<string, number>, key: string): void => {
+  counts.set(key, (counts.get(key) ?? 0) + 1);
+};
+
+const clearFailureCount = (counts: Map<string, number>, key: string): void => {
+  counts.delete(key);
+};
+
 const isLikelyDroppedItemEntity = (entity: any): boolean => {
   if (!entity?.position) {
     return false;
@@ -537,10 +545,10 @@ export const collectSkill = async (
   }
 
   const deadlineMs = Date.now() + Math.max(15000, Number(params.timeout_ms ?? 90000));
-  const perAttemptTimeoutMs = Math.max(3000, Number(params.attempt_timeout_ms ?? 9000));
-  const missLimit = Math.max(3, Math.floor(Number(params.miss_limit ?? 8) || 8));
-  const noProgressLimit = Math.max(3, Math.floor(Number(params.no_progress_limit ?? 10) || 10));
-  const maxAttempts = Math.max(12, desiredCount * 6);
+  const perAttemptTimeoutMs = Math.max(2500, Number(params.attempt_timeout_ms ?? 5000));
+  const missLimit = Math.max(3, Math.floor(Number(params.miss_limit ?? 5) || 5));
+  const noProgressLimit = Math.max(3, Math.floor(Number(params.no_progress_limit ?? 5) || 5));
+  const maxAttempts = Math.max(8, desiredCount * 4);
   let after = current;
   let attempts = 0;
   let misses = 0;
@@ -555,7 +563,7 @@ export const collectSkill = async (
       if (misses >= missLimit) {
         break;
       }
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await new Promise((resolve) => setTimeout(resolve, 80));
       continue;
     }
 
@@ -590,13 +598,13 @@ export const collectSkill = async (
         const postClear = ctx.bot.blockAt(refreshed.position);
         if (!postClear || postClear.name === "air") {
           misses += 1;
-          failedCandidateCounts.set(positionKey(refreshed.position), (failedCandidateCounts.get(positionKey(refreshed.position)) ?? 0) + 1);
+          incrementFailureCount(failedCandidateCounts, positionKey(refreshed.position));
           await wait(120);
           continue;
         }
         if (losResult !== "visible" && !isBlockVisible(ctx, postClear)) {
           misses += 1;
-          failedCandidateCounts.set(positionKey(postClear.position), (failedCandidateCounts.get(positionKey(postClear.position)) ?? 0) + 1);
+          incrementFailureCount(failedCandidateCounts, positionKey(postClear.position));
           await wait(120);
           continue;
         }
@@ -630,10 +638,10 @@ export const collectSkill = async (
           }
           if (after <= beforeAttempt) {
             noProgressAttempts += 1;
-            failedCandidateCounts.set(blockPosKey, (failedCandidateCounts.get(blockPosKey) ?? 0) + 1);
+            incrementFailureCount(failedCandidateCounts, blockPosKey);
           } else {
             noProgressAttempts = 0;
-            failedCandidateCounts.delete(blockPosKey);
+            clearFailureCount(failedCandidateCounts, blockPosKey);
           }
           if (noProgressAttempts >= noProgressLimit) {
             break;
@@ -666,10 +674,10 @@ export const collectSkill = async (
 
       if (after <= beforeAttempt) {
         noProgressAttempts += 1;
-        failedCandidateCounts.set(blockPosKey, (failedCandidateCounts.get(blockPosKey) ?? 0) + 1);
+        incrementFailureCount(failedCandidateCounts, blockPosKey);
       } else {
         noProgressAttempts = 0;
-        failedCandidateCounts.delete(blockPosKey);
+        clearFailureCount(failedCandidateCounts, blockPosKey);
       }
 
       if (attempts >= maxAttempts && after <= current) {
@@ -715,10 +723,10 @@ export const collectSkill = async (
         after = await waitForInventoryGain(ctx, target.inventoryItems, beforeManualCount, 1200);
         if (after <= beforeManualCount) {
           noProgressAttempts += 1;
-          failedCandidateCounts.set(positionKey(block.position), (failedCandidateCounts.get(positionKey(block.position)) ?? 0) + 1);
+          incrementFailureCount(failedCandidateCounts, positionKey(block.position));
         } else {
           noProgressAttempts = 0;
-          failedCandidateCounts.delete(positionKey(block.position));
+          clearFailureCount(failedCandidateCounts, positionKey(block.position));
         }
         if (noProgressAttempts >= noProgressLimit) {
           break;
@@ -737,7 +745,7 @@ export const collectSkill = async (
       if (noProgressAttempts >= noProgressLimit) {
         break;
       }
-      await new Promise((resolve) => setTimeout(resolve, 180));
+      await new Promise((resolve) => setTimeout(resolve, 80));
     }
   }
 

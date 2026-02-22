@@ -94,6 +94,11 @@ export const gotoNearestSkill = async (
   ctx: SkillExecutionContext,
   params: Record<string, unknown>
 ): Promise<SkillResultV1> => {
+  const readPositiveInt = (value: unknown, fallback: number): number => {
+    const parsed = Math.floor(Number(value));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  };
+
   const blockName = String(
     params.block ??
       params.resource ??
@@ -101,7 +106,7 @@ export const gotoNearestSkill = async (
       params.type ??
       ""
   );
-  const maxDistance = Number(params.max_distance ?? 48);
+  const maxDistance = readPositiveInt(params.max_distance, 48);
   if (!blockName) {
     return failure("DEPENDS_ON_ITEM", "goto_nearest requires block/resource name", false);
   }
@@ -117,8 +122,8 @@ export const gotoNearestSkill = async (
     candidates.push(fallback);
   }
 
-  const perCandidateTimeoutMs = Math.max(4000, Math.floor(Number(params.attempt_timeout_ms ?? 7000)));
-  const maxCandidates = Math.max(1, Math.floor(Number(params.max_candidates ?? 4)));
+  const perCandidateTimeoutMs = Math.max(3000, readPositiveInt(params.attempt_timeout_ms, 7000));
+  const maxCandidates = Math.max(1, readPositiveInt(params.max_candidates, 6));
   const cappedCandidates = candidates.slice(0, maxCandidates);
   let lastError: unknown = null;
 

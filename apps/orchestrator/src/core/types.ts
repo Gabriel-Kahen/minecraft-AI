@@ -17,6 +17,7 @@ export interface RuntimeSubgoal extends PlannerSubgoal {
   id: string;
   assignedAt: string;
   retryCount: number;
+  notBeforeMs?: number;
 }
 
 export interface RuntimeTaskState {

@@ -321,6 +321,12 @@ export class BotController {
 
     const queued = this.taskState.queue[0];
     if (queued) {
+      const nowMs = Date.now();
+      const nextReadyMs = queued.notBeforeMs ?? 0;
+      if (nextReadyMs > nowMs) {
+        const waitSeconds = Math.max(1, Math.ceil((nextReadyMs - nowMs) / 1000));
+        return `waiting ${waitSeconds}s -> ${this.subgoalSummary(queued)}`;
+      }
       return `queued ${this.subgoalSummary(queued)}`;
     }
 
@@ -341,7 +347,7 @@ export class BotController {
       if (typeof bot.collectBlock?.cancelTask === "function") {
         await Promise.race([
           bot.collectBlock.cancelTask(),
-          sleep(1200)
+          sleep(350)
         ]);
       }
     } catch {
@@ -861,7 +867,7 @@ export class BotController {
       return;
     }
 
-    if (now - this.lastPlanAt > 10000 && !this.taskState.pendingTriggers.includes("IDLE")) {
+    if (now - this.lastPlanAt > this.deps.config.IDLE_TRIGGER_MS && !this.taskState.pendingTriggers.includes("IDLE")) {
       this.taskState.pendingTriggers.push("IDLE");
     }
 
@@ -874,6 +880,10 @@ export class BotController {
         return;
       }
       await this.requestPlan(freshSnapshot);
+      if (!this.taskState.busy && this.taskState.queue.length > 0) {
+        await this.executeNextSubgoal();
+        return;
+      }
     }
 
     if (this.taskState.queue.length === 0) {
@@ -1070,7 +1080,16 @@ export class BotController {
       return;
     }
 
-    const subgoal = this.taskState.queue.shift();
+    const nowMs = Date.now();
+    const nextReadyIndex = this.taskState.queue.findIndex(
+      (candidate) => (candidate.notBeforeMs ?? 0) <= nowMs
+    );
+    if (nextReadyIndex < 0) {
+      this.deps.skillLimiter.leave(this.botId);
+      return;
+    }
+
+    const [subgoal] = this.taskState.queue.splice(nextReadyIndex, 1);
     if (!subgoal || !this.bot) {
       this.deps.skillLimiter.leave(this.botId);
       return;
@@ -1200,12 +1219,12 @@ export class BotController {
               retryDelayMs / 1000
             )}s (${result.errorCode})`
           );
-          await sleep(retryDelayMs);
           const retrySubgoal: RuntimeSubgoal = {
             ...subgoal,
             id: makeId(`subgoal_${this.botId}`),
             assignedAt: nowIso(),
-            retryCount: retryCount + 1
+            retryCount: retryCount + 1,
+            notBeforeMs: Date.now() + retryDelayMs
           };
           this.taskState.queue.unshift(retrySubgoal);
           this.log("SUBGOAL_REQUEUED", {
@@ -1274,7 +1293,8 @@ export class BotController {
       ...subgoal,
       id: makeId(`subgoal_${this.botId}`),
       assignedAt: nowIso(),
-      retryCount: 0
+      retryCount: 0,
+      notBeforeMs: 0
     };
   }
 

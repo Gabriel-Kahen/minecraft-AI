@@ -157,6 +157,7 @@ export const collectSkill = async (
   let attempts = 0;
   let misses = 0;
   let noProgressAttempts = 0;
+  let lastErrorDetail = "";
 
   while (Date.now() < deadlineMs && after < desiredCount) {
     const block = findNearestCollectBlock(ctx, target.searchBlocks, maxDistance);
@@ -212,6 +213,7 @@ export const collectSkill = async (
       }
     } catch (error) {
       const mapped = asSkillFailure(error, "RESOURCE_NOT_FOUND");
+      lastErrorDetail = mapped.details;
       const detailsLower = mapped.details.toLowerCase();
       if (
         detailsLower.includes("cannot dig") ||
@@ -221,11 +223,40 @@ export const collectSkill = async (
       ) {
         return failure("RESOURCE_NOT_FOUND", mapped.details, false);
       }
+
+      const manualResult = await tryManualDig(ctx, block);
+      if (manualResult === "cannot_dig") {
+        return failure(
+          "RESOURCE_NOT_FOUND",
+          `cannot dig ${block.name} at ${block.position?.x},${block.position?.y},${block.position?.z} (spawn-protection or permissions)`,
+          false
+        );
+      }
+      if (manualResult === "dug") {
+        attempts += 1;
+        misses = 0;
+        const beforeManualCount = after;
+        after = countInventoryItems(ctx, target.inventoryItems);
+        if (after <= beforeManualCount) {
+          noProgressAttempts += 1;
+        } else {
+          noProgressAttempts = 0;
+        }
+        if (noProgressAttempts >= 4) {
+          break;
+        }
+        continue;
+      }
+
       if (!mapped.retryable) {
         return mapped;
       }
       attempts += 1;
+      noProgressAttempts += 1;
       if (attempts >= Math.max(6, desiredCount * 3)) {
+        break;
+      }
+      if (noProgressAttempts >= 4) {
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, 600));
@@ -235,7 +266,7 @@ export const collectSkill = async (
   if (after < desiredCount) {
     return failure(
       "RESOURCE_NOT_FOUND",
-      `collected ${after}/${desiredCount} ${target.label} before timeout (attempts=${attempts}, no_progress=${noProgressAttempts})`,
+      `collected ${after}/${desiredCount} ${target.label} before timeout (attempts=${attempts}, no_progress=${noProgressAttempts}, last_error=${lastErrorDetail || "none"})`,
       true
     );
   }

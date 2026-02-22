@@ -108,23 +108,45 @@ export class ReflexManager {
           this.runImmediateReflex(bot);
         }
 
-        const position = bot.entity.position;
-        if (this.lastPos) {
-          const moved = Math.hypot(
-            position.x - this.lastPos.x,
-            position.y - this.lastPos.y,
-            position.z - this.lastPos.z
-          );
-          if (moved < 0.25) {
-            this.stuckCounter += 1;
-          } else {
-            this.stuckCounter = 0;
+        const pathfinder = bot.pathfinder;
+        const isPathfinderMoving =
+          Boolean(pathfinder) &&
+          typeof pathfinder.isMoving === "function" &&
+          pathfinder.isMoving();
+        const isPathfinderMining =
+          Boolean(pathfinder) &&
+          typeof pathfinder.isMining === "function" &&
+          pathfinder.isMining();
+        const isPathfinderBuilding =
+          Boolean(pathfinder) &&
+          typeof pathfinder.isBuilding === "function" &&
+          pathfinder.isBuilding();
+
+        // Only run "stuck" detection while the bot is actively trying to move.
+        // Mining/crafting/building can legitimately keep position nearly static.
+        if (isPathfinderMoving && !isPathfinderMining && !isPathfinderBuilding) {
+          const position = bot.entity.position;
+          if (this.lastPos) {
+            const moved = Math.hypot(
+              position.x - this.lastPos.x,
+              position.y - this.lastPos.y,
+              position.z - this.lastPos.z
+            );
+            if (moved < 0.25) {
+              this.stuckCounter += 1;
+            } else {
+              this.stuckCounter = 0;
+            }
           }
+
+          this.lastPos = { x: position.x, y: position.y, z: position.z };
+        } else {
+          this.stuckCounter = 0;
+          const position = bot.entity.position;
+          this.lastPos = { x: position.x, y: position.y, z: position.z };
         }
 
-        this.lastPos = { x: position.x, y: position.y, z: position.z };
-
-        if (this.stuckCounter >= 16) {
+        if (this.stuckCounter >= 20) {
           this.stuckCounter = 0;
           context.onTrigger("STUCK", { reason: "movement_threshold" });
           this.runImmediateReflex(bot);

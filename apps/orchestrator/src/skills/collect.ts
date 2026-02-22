@@ -304,13 +304,6 @@ export const collectSkill = async (
 
     try {
       await equipBestToolForBlock(ctx, block, false);
-      if (typeof ctx.bot.canDigBlock === "function" && !ctx.bot.canDigBlock(block)) {
-        return failure(
-          "RESOURCE_NOT_FOUND",
-          `cannot dig ${block.name} at ${block.position?.x},${block.position?.y},${block.position?.z} (spawn-protection or permissions)`,
-          false
-        );
-      }
 
       const beforeAttempt = after;
       if (shouldPreferManualDig(target, block)) {

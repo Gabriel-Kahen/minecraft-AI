@@ -2,6 +2,121 @@ import type { SkillResultV1 } from "../../../../contracts/skills";
 import type { SkillExecutionContext } from "./context";
 import { asSkillFailure, countItem, failure, findNearestBlock, gotoCoordinates, success } from "./helpers";
 import { Vec3 } from "vec3";
+import { getMcData } from "../utils/mc-data";
+
+const recipeNeedsTable = (recipe: any): boolean => {
+  if (Array.isArray(recipe.inShape)) {
+    const rows = recipe.inShape.length;
+    const cols = recipe.inShape.reduce(
+      (max: number, row: unknown) => Math.max(max, Array.isArray(row) ? row.length : 0),
+      0
+    );
+    return rows > 2 || cols > 2;
+  }
+  if (Array.isArray(recipe.ingredients)) {
+    return recipe.ingredients.length > 4;
+  }
+  return false;
+};
+
+const parseRecipeIngredients = (mcData: any, recipe: any): Map<string, number> => {
+  const byId = new Map<number, number>();
+  const push = (value: unknown): void => {
+    if (value === null || value === undefined) {
+      return;
+    }
+    if (typeof value === "number") {
+      byId.set(value, (byId.get(value) ?? 0) + 1);
+      return;
+    }
+    if (typeof value === "object") {
+      const raw = value as { id?: unknown; count?: unknown };
+      if (typeof raw.id === "number") {
+        const count = typeof raw.count === "number" && raw.count > 0 ? Math.floor(raw.count) : 1;
+        byId.set(raw.id, (byId.get(raw.id) ?? 0) + count);
+      }
+    }
+  };
+
+  if (Array.isArray(recipe.ingredients)) {
+    for (const ingredient of recipe.ingredients) {
+      push(ingredient);
+    }
+  }
+  if (Array.isArray(recipe.inShape)) {
+    for (const row of recipe.inShape) {
+      if (!Array.isArray(row)) {
+        continue;
+      }
+      for (const ingredient of row) {
+        push(ingredient);
+      }
+    }
+  }
+
+  const byName = new Map<string, number>();
+  for (const [id, count] of byId.entries()) {
+    const itemName = mcData.items?.[id]?.name;
+    if (!itemName) {
+      continue;
+    }
+    byName.set(itemName, (byName.get(itemName) ?? 0) + count);
+  }
+  return byName;
+};
+
+const inventoryCountByName = (ctx: SkillExecutionContext): Map<string, number> => {
+  const map = new Map<string, number>();
+  const items: Array<{ name: string; count: number }> = ctx.bot.inventory?.items?.() ?? [];
+  for (const item of items) {
+    map.set(item.name, (map.get(item.name) ?? 0) + item.count);
+  }
+  return map;
+};
+
+const missingIngredientsMessage = (ctx: SkillExecutionContext, mcData: any, itemId: number, itemName: string): string => {
+  const recipes = (mcData.recipes?.[itemId] ?? []) as any[];
+  if (recipes.length === 0) {
+    return `no recipe exists for ${itemName} in ${ctx.bot.version}`;
+  }
+
+  const inventory = inventoryCountByName(ctx);
+  const candidates = recipes
+    .map((recipe) => {
+      const ingredients = parseRecipeIngredients(mcData, recipe);
+      const missing: Array<{ name: string; count: number }> = [];
+      let totalMissing = 0;
+      for (const [name, needed] of ingredients.entries()) {
+        const have = inventory.get(name) ?? 0;
+        const miss = Math.max(0, needed - have);
+        if (miss > 0) {
+          missing.push({ name, count: miss });
+          totalMissing += miss;
+        }
+      }
+      return {
+        needsTable: recipeNeedsTable(recipe),
+        missing,
+        totalMissing
+      };
+    })
+    .sort((a, b) => a.totalMissing - b.totalMissing);
+
+  const best = candidates[0];
+  if (!best) {
+    return `no craftable recipe path found for ${itemName}`;
+  }
+  if (best.totalMissing === 0) {
+    return `recipe for ${itemName} exists but craft execution failed`;
+  }
+
+  const missingSummary = best.missing
+    .slice(0, 5)
+    .map((entry) => `${entry.name} x${entry.count}`)
+    .join(", ");
+  const tableNote = best.needsTable ? " (requires crafting table)" : "";
+  return `missing ingredients for ${itemName}${tableNote}: ${missingSummary}`;
+};
 
 const placeCraftingTableIfNeeded = async (ctx: SkillExecutionContext): Promise<any | null> => {
   let table = findNearestBlock(ctx, "crafting_table", 24);
@@ -91,7 +206,7 @@ export const craftSkill = async (
     return failure("DEPENDS_ON_ITEM", "craft requires item name", false);
   }
 
-  const mcData = require("minecraft-data")(ctx.bot.version);
+  const mcData = getMcData(ctx.bot.version);
   const item = mcData.itemsByName[itemName];
   if (!item) {
     return failure("DEPENDS_ON_ITEM", `unknown item ${itemName}`, false);
@@ -116,7 +231,7 @@ export const craftSkill = async (
 
       const recipe = recipes[0];
       if (!recipe) {
-        return failure("DEPENDS_ON_ITEM", `no recipe available for ${itemName}`, true);
+        return failure("DEPENDS_ON_ITEM", missingIngredientsMessage(ctx, mcData, item.id, itemName), true);
       }
 
       await ctx.bot.craft(recipe, 1, table);

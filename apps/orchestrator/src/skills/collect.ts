@@ -106,6 +106,58 @@ const findNearestCollectBlock = (
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+const nearestDroppedItemEntity = (ctx: SkillExecutionContext, maxDistance: number): any | null => {
+  const entities = Object.values(ctx.bot.entities ?? {}) as Array<any>;
+  let nearest: any | null = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+
+  for (const entity of entities) {
+    if (!entity?.position) {
+      continue;
+    }
+    if (entity.type !== "object") {
+      continue;
+    }
+    const distance = ctx.bot.entity.position.distanceTo(entity.position);
+    if (!Number.isFinite(distance) || distance > maxDistance) {
+      continue;
+    }
+    if (distance < nearestDistance) {
+      nearest = entity;
+      nearestDistance = distance;
+    }
+  }
+
+  return nearest;
+};
+
+const sweepNearbyDrops = async (
+  ctx: SkillExecutionContext,
+  maxDistance = 7,
+  maxPasses = 4
+): Promise<void> => {
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    const drop = nearestDroppedItemEntity(ctx, maxDistance);
+    if (!drop) {
+      return;
+    }
+
+    try {
+      await gotoCoordinates(
+        ctx,
+        drop.position.x,
+        drop.position.y,
+        drop.position.z,
+        1,
+        7000
+      );
+      await wait(250);
+    } catch {
+      return;
+    }
+  }
+};
+
 const shouldPreferManualDig = (target: CollectTargetSpec, block: any): boolean => {
   const name = String(block?.name ?? "");
   if (name.endsWith("_log")) {
@@ -137,6 +189,7 @@ const tryManualDig = async (ctx: SkillExecutionContext, block: any): Promise<"du
     await equipBestToolForBlock(ctx, refreshed, false);
     await ctx.bot.dig(refreshed);
     await wait(700);
+    await sweepNearbyDrops(ctx);
     return "dug";
   } catch {
     return "no_block";
@@ -229,6 +282,7 @@ export const collectSkill = async (
       }
 
       await withTimeout(collector([block]), perAttemptTimeoutMs);
+      await sweepNearbyDrops(ctx);
       attempts += 1;
       misses = 0;
       after = countInventoryItems(ctx, target.inventoryItems);
@@ -243,6 +297,7 @@ export const collectSkill = async (
           );
         }
         if (manualResult === "dug") {
+          await sweepNearbyDrops(ctx);
           after = countInventoryItems(ctx, target.inventoryItems);
         }
       }
@@ -288,6 +343,7 @@ export const collectSkill = async (
         );
       }
       if (manualResult === "dug") {
+        await sweepNearbyDrops(ctx);
         attempts += 1;
         misses = 0;
         const beforeManualCount = after;

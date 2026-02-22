@@ -54,6 +54,7 @@ const buildPrompt = (request: PlannerRequestV1): string => {
     "- goto_nearest: use params.block OR params.resource",
     "- craft/withdraw: use params.item and params.count",
     "- smelt: use params.input, optional params.fuel, and params.count",
+    "- combat_engage: use params.target_mode as one of hostile|animal|auto",
     "Execution semantics (executor handles micro-steps inside each subgoal):",
     "- craft: gather prerequisites, ensure/place/use crafting table, then craft",
     "- collect: locate source block, pathfind/mine, repeat until count",

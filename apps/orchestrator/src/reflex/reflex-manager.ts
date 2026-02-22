@@ -15,6 +15,8 @@ export interface ReflexBase {
 export class ReflexManager {
   private lastNightTriggerAt = 0;
 
+  private lastFleeTriggerAt = 0;
+
   private stuckCounter = 0;
 
   private lastPos: { x: number; y: number; z: number } | null = null;
@@ -69,6 +71,43 @@ export class ReflexManager {
       }
 
       if (context.isBusy()) {
+        const nearbyHostile = Object.values(bot.entities ?? {})
+          .filter((entity: any) => entity?.type === "mob")
+          .filter((entity: any) => {
+            const name = String(entity.name ?? "");
+            return (
+              name === "zombie" ||
+              name === "skeleton" ||
+              name === "creeper" ||
+              name === "spider" ||
+              name === "enderman" ||
+              name === "witch" ||
+              name === "drowned" ||
+              name === "husk"
+            );
+          })
+          .map((entity: any) => ({
+            name: entity.name,
+            distance: bot.entity.position.distanceTo(entity.position)
+          }))
+          .sort((a: any, b: any) => a.distance - b.distance)[0];
+
+        if (
+          nearbyHostile &&
+          nearbyHostile.distance <= 8 &&
+          bot.health <= 9 &&
+          Date.now() - this.lastFleeTriggerAt > 12000
+        ) {
+          this.lastFleeTriggerAt = Date.now();
+          context.onTrigger("ATTACKED", {
+            reason: "nearby_hostile_low_health",
+            hostile: nearbyHostile.name,
+            distance: nearbyHostile.distance,
+            health: bot.health
+          });
+          this.runImmediateReflex(bot);
+        }
+
         const position = bot.entity.position;
         if (this.lastPos) {
           const moved = Math.hypot(

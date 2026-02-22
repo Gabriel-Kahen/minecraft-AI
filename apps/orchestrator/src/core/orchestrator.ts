@@ -123,18 +123,16 @@ export class Orchestrator {
     }
 
     const connected = this.controllers.filter((controller) => controller.isConnected()).length;
-    const lines = [
-      `[tasks] connected ${connected}/${this.controllers.length}`,
-      ...this.controllers.map((controller) => `[task] ${controller.id} ${controller.taskSummary()}`.slice(0, 240))
-    ];
-    for (const line of lines) {
-      speaker.chat(line);
-    }
+    const summary = this.controllers
+      .map((controller) => `${controller.id}:${controller.taskSummary()}`)
+      .join(" | ");
+    const line = `[tasks] connected ${connected}/${this.controllers.length} | ${summary}`.slice(0, 240);
+    speaker.chat(line);
     this.deps.logger.write("orchestrator", {
       ts: nowIso(),
       botId: speaker.id,
       type: "CHAT_STATUS_SENT",
-      payload: { lines }
+      payload: { line }
     });
   }
 }

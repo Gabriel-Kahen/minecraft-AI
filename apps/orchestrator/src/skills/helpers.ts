@@ -5,6 +5,30 @@ import type { SkillFailure, SkillResultV1, SkillSuccess } from "../../../../cont
 import type { SkillExecutionContext } from "./context";
 import { getMcData } from "../utils/mc-data";
 
+const HOSTILE_MOB_NAMES = new Set([
+  "zombie",
+  "husk",
+  "drowned",
+  "skeleton",
+  "stray",
+  "creeper",
+  "spider",
+  "cave_spider",
+  "enderman",
+  "witch",
+  "pillager",
+  "vindicator",
+  "evoker"
+]);
+
+const FOOD_ANIMAL_NAMES = new Set([
+  "cow",
+  "pig",
+  "chicken",
+  "sheep",
+  "rabbit"
+]);
+
 export const success = (details: string, metrics?: Record<string, number>): SkillSuccess => ({
   outcome: "SUCCESS",
   details,
@@ -162,6 +186,9 @@ export const findNearestHostile = (ctx: SkillExecutionContext, maxDistance = 18)
       if (entity.type !== "mob") {
         return false;
       }
+      if (!HOSTILE_MOB_NAMES.has(String(entity.name ?? ""))) {
+        return false;
+      }
       const distance = ctx.bot.entity.position.distanceTo(entity.position);
       return distance <= maxDistance;
     })
@@ -171,6 +198,41 @@ export const findNearestHostile = (ctx: SkillExecutionContext, maxDistance = 18)
     );
 
   return hostiles[0] ?? null;
+};
+
+export const findNearestFoodAnimal = (ctx: SkillExecutionContext, maxDistance = 24): any | null => {
+  const entities = Object.values(ctx.bot.entities ?? {}) as Array<any>;
+  const animals = entities
+    .filter((entity) => {
+      if (entity.type !== "mob") {
+        return false;
+      }
+      if (!FOOD_ANIMAL_NAMES.has(String(entity.name ?? ""))) {
+        return false;
+      }
+      const distance = ctx.bot.entity.position.distanceTo(entity.position);
+      return distance <= maxDistance;
+    })
+    .sort(
+      (a, b) =>
+        ctx.bot.entity.position.distanceTo(a.position) - ctx.bot.entity.position.distanceTo(b.position)
+    );
+
+  return animals[0] ?? null;
+};
+
+export const countNearbyHostiles = (ctx: SkillExecutionContext, maxDistance = 16): number => {
+  const entities = Object.values(ctx.bot.entities ?? {}) as Array<any>;
+  return entities.filter((entity) => {
+    if (entity.type !== "mob") {
+      return false;
+    }
+    if (!HOSTILE_MOB_NAMES.has(String(entity.name ?? ""))) {
+      return false;
+    }
+    const distance = ctx.bot.entity.position.distanceTo(entity.position);
+    return distance <= maxDistance;
+  }).length;
 };
 
 export const loadBlueprint = async (ctx: SkillExecutionContext, requestedPath?: string): Promise<any> => {

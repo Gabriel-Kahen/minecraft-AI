@@ -1,6 +1,6 @@
 import type { SkillResultV1 } from "../../../../contracts/skills";
 import type { SkillExecutionContext } from "./context";
-import { failure, findNearestHostile, success } from "./helpers";
+import { countNearbyHostiles, failure, findNearestHostile, success } from "./helpers";
 
 export const combatGuardSkill = async (
   ctx: SkillExecutionContext,
@@ -18,6 +18,11 @@ export const combatGuardSkill = async (
   let engagements = 0;
 
   while (Date.now() - started < durationMs) {
+    if ((ctx.bot.health ?? 20) <= 7 && countNearbyHostiles(ctx, radius) > 0) {
+      pvp.stop();
+      return failure("INTERRUPTED_BY_HOSTILES", "guard disengaged to preserve health", true);
+    }
+
     const target = findNearestHostile(ctx, radius);
     if (target) {
       pvp.attack(target);

@@ -82,6 +82,12 @@ export class BotController {
 
   private lastTaskEventChatAtMs = 0;
 
+  private lastChatAtMs = 0;
+
+  private lastChatMessage = "";
+
+  private lastChatMessageAtMs = 0;
+
   private repeatedFailureKey: string | null = null;
 
   private repeatedFailureCount = 0;
@@ -134,8 +140,28 @@ export class BotController {
       return;
     }
 
+    const normalized = message.trim();
+    if (!normalized) {
+      return;
+    }
+
+    const nowMs = Date.now();
+    if (nowMs - this.lastChatAtMs < this.deps.config.CHAT_MIN_INTERVAL_MS) {
+      return;
+    }
+
+    if (
+      this.lastChatMessage === normalized &&
+      nowMs - this.lastChatMessageAtMs < this.deps.config.CHAT_DUPLICATE_WINDOW_MS
+    ) {
+      return;
+    }
+
     try {
-      this.bot.chat(message);
+      this.bot.chat(normalized.slice(0, 240));
+      this.lastChatAtMs = nowMs;
+      this.lastChatMessage = normalized;
+      this.lastChatMessageAtMs = nowMs;
     } catch {
       // best-effort status broadcast only
     }
@@ -837,12 +863,13 @@ export class BotController {
       steps: this.subgoalExecutionSteps(subgoal)
     });
     this.maybeChatTaskEvent(`[task] ${this.botId} start ${this.subgoalSummary(subgoal)}`);
-    this.maybeChatTaskEvent(
-      `[steps] ${this.botId} ${this.subgoalExecutionSteps(subgoal)
-        .map((step, index) => `${index + 1}) ${step}`)
-        .join(" | ")}`,
-      true
-    );
+    if (this.deps.config.CHAT_INCLUDE_STEPS) {
+      this.maybeChatTaskEvent(
+        `[steps] ${this.botId} ${this.subgoalExecutionSteps(subgoal)
+          .map((step, index) => `${index + 1}) ${step}`)
+          .join(" | ")}`
+      );
+    }
 
     try {
       const result = await this.deps.skillEngine.execute(

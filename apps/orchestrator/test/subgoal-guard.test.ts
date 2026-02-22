@@ -71,4 +71,47 @@ describe("enforceSubgoalPrerequisites", () => {
     expect(guarded.subgoals).toHaveLength(1);
     expect(guarded.subgoals[0]?.name).toBe("collect");
   });
+
+  it("injects table and ingredient prerequisites before crafting wooden pickaxe", () => {
+    const snapshot = baseSnapshot();
+    const plan: PlannerSubgoal[] = [
+      {
+        name: "craft",
+        params: { item: "wooden_pickaxe", count: 1 },
+        success_criteria: { item_count_gte: 1 }
+      }
+    ];
+
+    const guarded = enforceSubgoalPrerequisites(snapshot, plan);
+    expect(guarded.subgoals.length).toBeGreaterThan(1);
+    expect(guarded.subgoals.at(-1)?.name).toBe("craft");
+    expect(String(guarded.subgoals.at(-1)?.params.item)).toBe("wooden_pickaxe");
+
+    const nonTerminal = guarded.subgoals.slice(0, -1);
+    expect(
+      nonTerminal.some((subgoal) => subgoal.name === "craft" && String(subgoal.params.item) === "crafting_table")
+    ).toBe(true);
+    expect(nonTerminal.some((subgoal) => subgoal.name === "collect")).toBe(true);
+  });
+
+  it("does not treat far crafting table as usable access", () => {
+    const snapshot = baseSnapshot();
+    snapshot.nearby_summary.points_of_interest = [
+      { type: "crafting_table", distance: 20, position: { x: 20, y: 64, z: 0 } }
+    ];
+
+    const plan: PlannerSubgoal[] = [
+      {
+        name: "craft",
+        params: { item: "wooden_pickaxe", count: 1 },
+        success_criteria: { item_count_gte: 1 }
+      }
+    ];
+
+    const guarded = enforceSubgoalPrerequisites(snapshot, plan);
+    const nonTerminal = guarded.subgoals.slice(0, -1);
+    expect(
+      nonTerminal.some((subgoal) => subgoal.name === "craft" && String(subgoal.params.item) === "crafting_table")
+    ).toBe(true);
+  });
 });

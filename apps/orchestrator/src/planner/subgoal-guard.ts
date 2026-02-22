@@ -24,7 +24,7 @@ interface PlanningContext {
   snapshot: SnapshotV1;
   projected: Map<string, number>;
   nearbyResourceDistance: Map<string, number>;
-  nearbyPoi: Set<string>;
+  nearbyPoiDistance: Map<string, number>;
 }
 
 const mcDataCache = new Map<string, any>();
@@ -67,6 +67,22 @@ const buildNearbyResourceDistance = (snapshot: SnapshotV1): Map<string, number> 
     }
   }
   return map;
+};
+
+const buildNearbyPoiDistance = (snapshot: SnapshotV1): Map<string, number> => {
+  const map = new Map<string, number>();
+  for (const poi of snapshot.nearby_summary.points_of_interest) {
+    const existing = map.get(poi.type);
+    if (existing === undefined || poi.distance < existing) {
+      map.set(poi.type, poi.distance);
+    }
+  }
+  return map;
+};
+
+const hasNearbyPoi = (ctx: PlanningContext, poiName: string, maxDistance: number): boolean => {
+  const distance = ctx.nearbyPoiDistance.get(poiName);
+  return distance !== undefined && distance <= maxDistance;
 };
 
 const hasItem = (ctx: PlanningContext, itemName: string, count = 1): boolean =>
@@ -204,7 +220,7 @@ const pickRecipePlan = (
   }
 
   const tableAccessible =
-    hasItem(ctx, "crafting_table", 1) || ctx.nearbyPoi.has("crafting_table");
+    hasItem(ctx, "crafting_table", 1) || hasNearbyPoi(ctx, "crafting_table", 8);
 
   const ranked = recipes
     .map((recipe) => {
@@ -370,7 +386,7 @@ const planAcquireItem = (
   if (recipePlan) {
     if (recipePlan.needsTable && itemName !== "crafting_table") {
       const hasTableAccess =
-        hasItem(ctx, "crafting_table", 1) || ctx.nearbyPoi.has("crafting_table");
+        hasItem(ctx, "crafting_table", 1) || hasNearbyPoi(ctx, "crafting_table", 8);
       if (!hasTableAccess) {
         const tablePlan = planAcquireItem(ctx, "crafting_table", 1, notes, stack, depth + 1);
         subgoals.push(...tablePlan);
@@ -494,7 +510,7 @@ const ensureCraftPrerequisites = (
 
   if (recipePlan.needsTable && itemName !== "crafting_table") {
     const hasTableAccess =
-      hasItem(ctx, "crafting_table", 1) || ctx.nearbyPoi.has("crafting_table");
+      hasItem(ctx, "crafting_table", 1) || hasNearbyPoi(ctx, "crafting_table", 8);
     if (!hasTableAccess) {
       prerequisites.push(...planAcquireItem(ctx, "crafting_table", 1, notes));
     }
@@ -513,7 +529,7 @@ const createContext = (snapshot: SnapshotV1, mcVersion: string): PlanningContext
   snapshot,
   projected: buildProjectedInventory(snapshot),
   nearbyResourceDistance: buildNearbyResourceDistance(snapshot),
-  nearbyPoi: new Set(snapshot.nearby_summary.points_of_interest.map((poi) => poi.type))
+  nearbyPoiDistance: buildNearbyPoiDistance(snapshot)
 });
 
 export const enforceSubgoalPrerequisites = (

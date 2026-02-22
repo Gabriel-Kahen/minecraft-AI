@@ -1,10 +1,16 @@
 import type { SkillResultV1 } from "../../../../contracts/skills";
 import type { SkillExecutionContext } from "./context";
-import { asSkillFailure, countItem, failure, findNearestBlock, success } from "./helpers";
+import { asSkillFailure, countItem, failure, findNearestBlock, gotoCoordinates, success } from "./helpers";
 
 const placeCraftingTableIfNeeded = async (ctx: SkillExecutionContext): Promise<any | null> => {
-  let table = findNearestBlock(ctx, "crafting_table", 8);
+  let table = findNearestBlock(ctx, "crafting_table", 24);
   if (table) {
+    try {
+      await gotoCoordinates(ctx, table.position.x, table.position.y, table.position.z, 3, 15000);
+    } catch {
+      // If movement fails we'll still try local placement fallback.
+    }
+    table = findNearestBlock(ctx, "crafting_table", 8) ?? table;
     return table;
   }
 
@@ -20,7 +26,7 @@ const placeCraftingTableIfNeeded = async (ctx: SkillExecutionContext): Promise<a
   }
 
   await ctx.bot.placeBlock(reference, ctx.bot.entity.position.offset(1, 0, 0).minus(reference.position));
-  table = findNearestBlock(ctx, "crafting_table", 8);
+  table = findNearestBlock(ctx, "crafting_table", 12);
   return table;
 };
 
@@ -48,7 +54,11 @@ export const craftSkill = async (
       if (recipes.length === 0) {
         table = await placeCraftingTableIfNeeded(ctx);
         if (!table) {
-          return failure("DEPENDS_ON_ITEM", "crafting table required but unavailable", true);
+          return failure(
+            "DEPENDS_ON_ITEM",
+            "crafting table required but unavailable (no nearby table and none in inventory)",
+            false
+          );
         }
         recipes = ctx.bot.recipesFor(item.id, null, 1, table);
       }

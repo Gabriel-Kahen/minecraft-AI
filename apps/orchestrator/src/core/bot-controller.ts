@@ -389,6 +389,7 @@ export class BotController {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.deps.skillLimiter.forget(this.botId);
     if (this.loopTimer) {
       clearInterval(this.loopTimer);
       this.loopTimer = null;
@@ -495,6 +496,7 @@ export class BotController {
       return;
     }
 
+    this.deps.skillLimiter.forget(this.botId);
     this.disconnectStreak += 1;
     this.connected = false;
     this.reconnectPending = true;
@@ -832,6 +834,17 @@ export class BotController {
         category: "planner_error",
         error: error instanceof Error ? error.message : String(error)
       });
+
+      if (this.taskState.queue.length === 0) {
+        const localPlan = buildLocalActivityPlan(snapshot, this.deps.config.MC_VERSION);
+        if (localPlan.subgoals.length > 0) {
+          this.taskState.queue = localPlan.subgoals.map((subgoal) => this.runtimeSubgoal(subgoal));
+          this.log("PLANNER_LOCAL_FALLBACK_ENQUEUED", {
+            reason: localPlan.reason,
+            subgoals: localPlan.subgoals.map((subgoal) => subgoal.name)
+          });
+        }
+      }
     } finally {
       this.plannerInFlight = false;
     }
@@ -969,7 +982,15 @@ export class BotController {
             retry_delay_ms: retryDelayMs
           });
         } else {
-          // For non-retryable or exhausted attempts, request immediate replan to avoid idle stalls.
+          // For non-retryable or exhausted attempts, clear stale dependent queue and request immediate replan.
+          if (this.taskState.queue.length > 0) {
+            this.log("QUEUE_DROPPED_AFTER_HARD_FAILURE", {
+              failed_subgoal: subgoal.name,
+              error_code: result.errorCode,
+              dropped_count: this.taskState.queue.length
+            });
+            this.taskState.queue = [];
+          }
           this.taskState.plannerCooldownUntil = Date.now();
           this.taskState.pendingTriggers = ["SUBGOAL_FAILED"];
         }

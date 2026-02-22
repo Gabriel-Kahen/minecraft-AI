@@ -6,8 +6,7 @@ import {
   findNearestFoodAnimal,
   findNearestHostile,
   gotoCoordinates,
-  success,
-  withTimeout
+  success
 } from "./helpers";
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -89,18 +88,27 @@ export const combatEngageSkill = async (
 
   try {
     pvp.attack(target);
-    await withTimeout(
-      new Promise<void>((resolve) => {
-        const interval = setInterval(() => {
-          const refreshed = ctx.bot.entities[target.id];
-          if (!refreshed || refreshed.isValid === false) {
+    await new Promise<void>((resolve, reject) => {
+      let finished = false;
+      const interval = setInterval(() => {
+        const refreshed = ctx.bot.entities[target.id];
+        if (!refreshed || refreshed.isValid === false) {
+          if (!finished) {
+            finished = true;
             clearInterval(interval);
+            clearTimeout(timeout);
             resolve();
           }
-        }, 300);
-      }),
-      timeoutMs
-    );
+        }
+      }, 300);
+      const timeout = setTimeout(() => {
+        if (!finished) {
+          finished = true;
+          clearInterval(interval);
+          reject(new Error("combat timeout"));
+        }
+      }, Math.max(1500, timeoutMs));
+    });
     pvp.stop();
     await sweepCombatDrops(ctx);
     return success(`engaged target ${target.name}`);

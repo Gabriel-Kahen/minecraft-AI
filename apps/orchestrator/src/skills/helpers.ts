@@ -107,54 +107,80 @@ export const gotoCoordinates = async (
 ): Promise<void> => {
   ensureMovements(ctx);
 
+  const target = new Vec3(x, y, z);
+  if (ctx.bot.entity.position.distanceTo(target) <= range + 0.2) {
+    return;
+  }
+
   const pathfinderModule = getPathfinderModule();
   const goal = new pathfinderModule.goals.GoalNear(Math.floor(x), Math.floor(y), Math.floor(z), range);
-  const distance = ctx.bot.entity.position.distanceTo(new Vec3(x, y, z));
+  const distance = ctx.bot.entity.position.distanceTo(target);
   const computedTimeoutMs = Math.min(90000, Math.max(timeoutMs, 8000 + Math.round(distance * 1200)));
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let noPathEvents = 0;
+    let timeoutHandle: NodeJS.Timeout | null = null;
 
-  await withTimeout(
-    new Promise<void>((resolve, reject) => {
-      let settled = false;
-      let noPathEvents = 0;
+    const cleanup = (): void => {
+      ctx.bot.removeListener("goal_reached", onGoalReached);
+      ctx.bot.removeListener("path_reset", onPathReset);
+      ctx.bot.removeListener("error", onError);
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+        timeoutHandle = null;
+      }
+    };
 
-      const cleanup = (): void => {
-        ctx.bot.removeListener("goal_reached", onGoalReached);
-        ctx.bot.removeListener("path_reset", onPathReset);
-        ctx.bot.removeListener("error", onError);
-      };
-
-      const settle = (fn: () => void): void => {
-        if (settled) {
-          return;
+    const settle = (fn: () => void, stopGoal = false): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      if (stopGoal) {
+        try {
+          ctx.bot.pathfinder?.setGoal(null);
+        } catch {
+          // ignore best-effort path cancel
         }
-        settled = true;
-        cleanup();
-        fn();
-      };
+      }
+      fn();
+    };
 
-      const onGoalReached = (): void => settle(resolve);
-      const onPathReset = (reason: string): void => {
-        if (reason === "noPath") {
-          noPathEvents += 1;
-          if (noPathEvents >= 3) {
-            settle(() => reject(failure("PATHFIND_FAILED", "pathfinder reported no path")));
-          }
+    const onGoalReached = (reachedGoal: unknown): void => {
+      if (reachedGoal && reachedGoal !== goal) {
+        return;
+      }
+      settle(resolve);
+    };
+    const onPathReset = (reason: string): void => {
+      if (reason === "noPath") {
+        noPathEvents += 1;
+        if (noPathEvents >= 3) {
+          settle(() => reject(failure("PATHFIND_FAILED", "pathfinder reported no path")), true);
         }
-      };
-      const onError = (err: unknown): void =>
-        settle(() => reject(failure("PATHFIND_FAILED", err instanceof Error ? err.message : "pathfinding error")));
+      }
+    };
+    const onError = (err: unknown): void =>
+      settle(
+        () =>
+          reject(
+            failure("PATHFIND_FAILED", err instanceof Error ? err.message : "pathfinding error")
+          ),
+        true
+      );
 
-      ctx.bot.once("goal_reached", onGoalReached);
-      ctx.bot.on("path_reset", onPathReset);
-      ctx.bot.once("error", onError);
-      ctx.bot.pathfinder.setGoal(goal);
-    }),
-    computedTimeoutMs
-  ).catch((err) => {
-    if (typeof err === "object" && err && "errorCode" in err) {
-      throw err;
-    }
-    throw failure("PATHFIND_FAILED", err instanceof Error ? err.message : "path timeout");
+    timeoutHandle = setTimeout(() => {
+      settle(
+        () => reject(failure("PATHFIND_FAILED", `path timeout after ${computedTimeoutMs}ms`)),
+        true
+      );
+    }, computedTimeoutMs);
+
+    ctx.bot.on("goal_reached", onGoalReached);
+    ctx.bot.on("path_reset", onPathReset);
+    ctx.bot.on("error", onError);
+    ctx.bot.pathfinder.setGoal(goal);
   });
 };
 

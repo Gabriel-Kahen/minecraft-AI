@@ -581,14 +581,31 @@ export class BotController {
       case "INTERRUPTED_BY_HOSTILES":
       case "STUCK_TIMEOUT":
       case "INVENTORY_FULL":
+      case "COMBAT_LOST_TARGET":
+      case "PLACEMENT_FAILED":
         return true;
       case "DEPENDS_ON_ITEM":
       case "NO_TOOL_AVAILABLE":
-      case "PLACEMENT_FAILED":
-      case "COMBAT_LOST_TARGET":
       case "BOT_DIED":
       default:
         return false;
+    }
+  }
+
+  private retryLimitFor(errorCode: FailureCode): number {
+    const base = this.deps.config.SUBGOAL_RETRY_LIMIT;
+    switch (errorCode) {
+      case "PATHFIND_FAILED":
+      case "RESOURCE_NOT_FOUND":
+        return base + 4;
+      case "INTERRUPTED_BY_HOSTILES":
+      case "COMBAT_LOST_TARGET":
+        return base + 3;
+      case "STUCK_TIMEOUT":
+      case "PLACEMENT_FAILED":
+        return base + 2;
+      default:
+        return base;
     }
   }
 
@@ -944,7 +961,10 @@ export class BotController {
         const retryCount = subgoal.retryCount ?? 0;
         const nowMs = Date.now();
         const failureKey = `${subgoal.name}:${result.errorCode}`;
-        if (this.repeatedFailureKey === failureKey && nowMs - this.repeatedFailureLastAtMs <= 60000) {
+        if (
+          this.repeatedFailureKey === failureKey &&
+          nowMs - this.repeatedFailureLastAtMs <= this.deps.config.SUBGOAL_FAILURE_STREAK_WINDOW_MS
+        ) {
           this.repeatedFailureCount += 1;
         } else {
           this.repeatedFailureKey = failureKey;
@@ -952,7 +972,7 @@ export class BotController {
         }
         this.repeatedFailureLastAtMs = nowMs;
 
-        if (this.repeatedFailureCount >= 3) {
+        if (this.repeatedFailureCount >= this.deps.config.SUBGOAL_LOOP_GUARD_REPEATS) {
           retryable = false;
           this.log("SUBGOAL_LOOP_GUARD", {
             subgoal: subgoal.name,
@@ -961,7 +981,8 @@ export class BotController {
           });
         }
 
-        if (retryable && retryCount < this.deps.config.SUBGOAL_RETRY_LIMIT) {
+        const retryLimit = this.retryLimitFor(result.errorCode);
+        if (retryable && retryCount < retryLimit) {
           const baseDelayMs = this.deps.config.SUBGOAL_RETRY_BASE_DELAY_MS * (retryCount + 1);
           const retryDelayMs = Math.min(
             this.deps.config.SUBGOAL_RETRY_MAX_DELAY_MS,
@@ -979,7 +1000,8 @@ export class BotController {
             subgoal: subgoal.name,
             retry_count: retrySubgoal.retryCount,
             error_code: result.errorCode,
-            retry_delay_ms: retryDelayMs
+            retry_delay_ms: retryDelayMs,
+            retry_limit: retryLimit
           });
         } else {
           // For non-retryable or exhausted attempts, clear stale dependent queue and request immediate replan.

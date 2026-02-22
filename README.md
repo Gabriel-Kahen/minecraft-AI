@@ -15,6 +15,18 @@ TypeScript implementation of a planner/executor Minecraft automation stack:
 - Strict JSON schema validation gates all planner input/output.
 - Every build intent uses agent-generated blueprints; stock templates are disabled.
 
+## Mineflayer Plugin Stack
+
+- Core: `mineflayer-pathfinder`, `mineflayer-collectblock`, `mineflayer-tool`, `mineflayer-auto-eat`, `mineflayer-armor-manager`, `mineflayer-pvp`
+- Optional observability/combat: `@miner-org/bloodhound`, `mineflayer-tps`, `mineflayer-web-inventory`
+- Optional debug view: `prismarine-viewer`
+
+Toggle optional plugins via config:
+- `BLOODHOUND_ENABLED`
+- `TPS_PLUGIN_ENABLED`
+- `WEB_INVENTORY_ENABLED`
+- `WEB_INVENTORY_PORT_BASE`
+
 ## Project Layout
 
 - `apps/orchestrator`: runtime orchestrator service

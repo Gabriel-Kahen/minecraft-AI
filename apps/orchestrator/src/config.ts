@@ -100,6 +100,19 @@ const envSchema = z.object({
     .optional()
     .transform((value) => parseBoolean(value, false)),
   VIEWER_PORT_BASE: z.coerce.number().int().min(1).max(65535).default(3007),
+  WEB_INVENTORY_ENABLED: z
+    .unknown()
+    .optional()
+    .transform((value) => parseBoolean(value, false)),
+  WEB_INVENTORY_PORT_BASE: z.coerce.number().int().min(1).max(65535).default(4100),
+  BLOODHOUND_ENABLED: z
+    .unknown()
+    .optional()
+    .transform((value) => parseBoolean(value, true)),
+  TPS_PLUGIN_ENABLED: z
+    .unknown()
+    .optional()
+    .transform((value) => parseBoolean(value, true)),
   MAX_CONCURRENT_EXPLORERS: z.coerce.number().int().min(1).max(5).default(2),
   LOCK_LEASE_MS: z.coerce.number().int().min(1000).default(45000),
   LOCK_HEARTBEAT_MS: z.coerce.number().int().min(1000).default(12000),

@@ -30,9 +30,10 @@ const FOOD_ANIMAL_NAMES = new Set([
 ]);
 
 const PATHFIND_MAX_ATTEMPTS = 3;
-const PATHFIND_MAX_TIMEOUT_MS = 45000;
+const PATHFIND_MAX_TIMEOUT_MS = 20000;
 const PATHFIND_STALL_CHECK_INTERVAL_MS = 400;
-const PATHFIND_STALL_FAIL_MS = 6500;
+const PATHFIND_STALL_FAIL_MS = 4200;
+const PATHFIND_INACTIVE_FAIL_MS = 2200;
 const PATHFIND_NUDGE_MS = 280;
 const PATHFIND_RETRY_JITTER_BASE_MS = 140;
 const PATHFIND_RETRY_JITTER_SPAN_MS = 120;
@@ -157,14 +158,16 @@ export const gotoCoordinates = async (
     const distance = ctx.bot.entity.position.distanceTo(target);
     const computedTimeoutMs = Math.min(
       PATHFIND_MAX_TIMEOUT_MS,
-      Math.max(timeoutMs, 2500 + Math.round(distance * 500) + (attempt - 1) * 1500)
+      Math.max(timeoutMs, 2200 + Math.round(distance * 280) + (attempt - 1) * 1000)
     );
 
     await new Promise<void>((resolve, reject) => {
       let settled = false;
       let noPathEvents = 0;
+      let sawPathActivity = false;
       let timeoutHandle: NodeJS.Timeout | null = null;
       let movementWatchHandle: NodeJS.Timeout | null = null;
+      const attemptStartedAt = Date.now();
       let lastMoveAt = Date.now();
       let lastPos = ctx.bot.entity.position.clone();
 
@@ -207,6 +210,7 @@ export const gotoCoordinates = async (
       };
 
       const onPathReset = (reason: string): void => {
+        sawPathActivity = true;
         if (reason === "noPath") {
           noPathEvents += 1;
         }
@@ -216,6 +220,7 @@ export const gotoCoordinates = async (
         if (!update) {
           return;
         }
+        sawPathActivity = true;
         if (update.status === "noPath" || update.status === "timeout") {
           noPathEvents += 1;
           return;
@@ -269,8 +274,37 @@ export const gotoCoordinates = async (
           pathfinder.isMoving();
 
         const stalledForMs = Date.now() - lastMoveAt;
+        const sinceStartMs = Date.now() - attemptStartedAt;
         if (noPathEvents >= PATHFIND_NO_PATH_EVENT_LIMIT && !isMoving && stalledForMs >= 1500) {
           settle(() => reject(failure("PATHFIND_FAILED", "pathfinder reported no stable path")), true);
+          return;
+        }
+
+        if (!isMoving && !sawPathActivity && sinceStartMs >= PATHFIND_INACTIVE_FAIL_MS) {
+          settle(
+            () =>
+              reject(
+                failure(
+                  "PATHFIND_FAILED",
+                  `pathfinder inactive for ${sinceStartMs}ms (no movement/path updates)`
+                )
+              ),
+            true
+          );
+          return;
+        }
+
+        if (!isMoving && stalledForMs >= PATHFIND_STALL_FAIL_MS) {
+          settle(
+            () =>
+              reject(
+                failure(
+                  "PATHFIND_FAILED",
+                  `pathfinder stopped moving for ${stalledForMs}ms`
+                )
+              ),
+            true
+          );
           return;
         }
 

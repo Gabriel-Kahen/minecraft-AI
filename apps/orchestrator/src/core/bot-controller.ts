@@ -148,6 +148,8 @@ export class BotController {
 
   private lastStuckTriggerAtMs = 0;
 
+  private lastCombatSignalAtMs = 0;
+
   private lastActivityAtMs = Date.now();
 
   private lastActivityPosition: { x: number; y: number; z: number } | null = null;
@@ -556,9 +558,19 @@ export class BotController {
     });
 
     this.bot = bot;
-    loadMineflayerPlugins(bot, {
+    const pluginReport = loadMineflayerPlugins(bot, {
+      mineflayer,
       debugViewer: this.deps.config.DEBUG_VIEWER,
-      viewerPort: this.deps.config.VIEWER_PORT_BASE + Number(this.botId.split("-").at(-1) ?? 0)
+      viewerPort: this.deps.config.VIEWER_PORT_BASE + Number(this.botId.split("-").at(-1) ?? 0),
+      bloodhoundEnabled: this.deps.config.BLOODHOUND_ENABLED,
+      tpsPluginEnabled: this.deps.config.TPS_PLUGIN_ENABLED,
+      webInventoryEnabled: this.deps.config.WEB_INVENTORY_ENABLED,
+      webInventoryPort: this.deps.config.WEB_INVENTORY_PORT_BASE + Number(this.botId.split("-").at(-1) ?? 0)
+    });
+    this.log("PLUGIN_STACK", {
+      loaded: pluginReport.loaded,
+      failed: pluginReport.failed,
+      web_inventory_url: pluginReport.webInventoryUrl ?? null
     });
 
     bot.once("spawn", () => {
@@ -647,6 +659,42 @@ export class BotController {
         return;
       }
       this.markActivity();
+    });
+
+    bot.on("entityAttack", (victim: any, attacker: any, weapon: any) => {
+      if (this.bot !== bot || this.stopped) {
+        return;
+      }
+      const nowMs = Date.now();
+      if (nowMs - this.lastCombatSignalAtMs < 1200) {
+        return;
+      }
+      this.lastCombatSignalAtMs = nowMs;
+      const botInvolved = victim === bot.entity || attacker === bot.entity;
+      if (botInvolved) {
+        this.markActivity();
+      }
+
+      const victimName = String(victim?.username ?? victim?.name ?? victim?.displayName ?? "unknown");
+      const attackerName = String(
+        attacker?.username ?? attacker?.name ?? attacker?.displayName ?? "unknown"
+      );
+      const weaponName = weapon ? String(weapon?.name ?? weapon?.displayName ?? "unknown") : null;
+
+      this.log("COMBAT_SIGNAL", {
+        victim: victimName,
+        attacker: attackerName,
+        weapon: weaponName,
+        bot_involved: botInvolved
+      });
+
+      if (victim === bot.entity) {
+        this.pushTrigger("ATTACKED", {
+          reason: "entity_attack",
+          attacker: attackerName,
+          weapon: weaponName
+        });
+      }
     });
 
     bot.on("error", (error: unknown) => {

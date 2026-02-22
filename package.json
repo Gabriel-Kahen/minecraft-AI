@@ -25,6 +25,9 @@
     "mineflayer-armor-manager": {
       "mineflayer": "4.22.0"
     },
+    "@miner-org/bloodhound": {
+      "mineflayer": "4.22.0"
+    },
     "minecraft-protocol": "1.49.0"
   },
   "workspaces": [

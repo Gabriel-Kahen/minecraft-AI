@@ -31,12 +31,35 @@ const extractPlugin = (moduleValue: unknown): ((bot: Bot) => void) | null => {
   return null;
 };
 
+const stringifyError = (error: unknown): string => {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+};
+
 export interface PluginLoadOptions {
+  mineflayer?: unknown;
   debugViewer: boolean;
   viewerPort: number;
+  bloodhoundEnabled: boolean;
+  tpsPluginEnabled: boolean;
+  webInventoryEnabled: boolean;
+  webInventoryPort: number;
 }
 
-export const loadMineflayerPlugins = (bot: Bot, options: PluginLoadOptions): void => {
+export interface PluginLoadReport {
+  loaded: string[];
+  failed: Array<{ name: string; reason: string }>;
+  webInventoryUrl?: string;
+}
+
+export const loadMineflayerPlugins = (bot: Bot, options: PluginLoadOptions): PluginLoadReport => {
+  const report: PluginLoadReport = {
+    loaded: [],
+    failed: []
+  };
+
   const modules = [
     "mineflayer-pathfinder",
     "mineflayer-collectblock",
@@ -45,12 +68,83 @@ export const loadMineflayerPlugins = (bot: Bot, options: PluginLoadOptions): voi
     "mineflayer-armor-manager",
     "mineflayer-pvp"
   ];
+  if (options.bloodhoundEnabled) {
+    modules.push("@miner-org/bloodhound");
+  }
 
   for (const moduleName of modules) {
     const moduleValue = loadPluginModule(moduleName);
     const plugin = extractPlugin(moduleValue);
     if (plugin) {
-      bot.loadPlugin(plugin);
+      try {
+        bot.loadPlugin(plugin);
+        report.loaded.push(moduleName);
+      } catch (error) {
+        report.failed.push({
+          name: moduleName,
+          reason: stringifyError(error)
+        });
+      }
+    } else {
+      report.failed.push({
+        name: moduleName,
+        reason: "plugin export not found"
+      });
+    }
+  }
+
+  if (options.tpsPluginEnabled) {
+    const tpsFactory = loadPluginModule("mineflayer-tps");
+    const mineflayerRef = options.mineflayer ?? loadPluginModule("mineflayer");
+    if (typeof tpsFactory === "function" && mineflayerRef) {
+      try {
+        const tpsPluginCandidate = (tpsFactory as (mineflayerValue: unknown) => unknown)(mineflayerRef);
+        const tpsPlugin = extractPlugin(tpsPluginCandidate);
+        if (tpsPlugin) {
+          bot.loadPlugin(tpsPlugin);
+          report.loaded.push("mineflayer-tps");
+        } else {
+          report.failed.push({
+            name: "mineflayer-tps",
+            reason: "plugin export not found"
+          });
+        }
+      } catch (error) {
+        report.failed.push({
+          name: "mineflayer-tps",
+          reason: stringifyError(error)
+        });
+      }
+    } else {
+      report.failed.push({
+        name: "mineflayer-tps",
+        reason: "factory or mineflayer dependency unavailable"
+      });
+    }
+  }
+
+  if (options.webInventoryEnabled) {
+    const inventoryViewer = loadPluginModule("mineflayer-web-inventory");
+    if (typeof inventoryViewer === "function") {
+      try {
+        (inventoryViewer as (botValue: Bot, settings: Record<string, unknown>) => void)(bot, {
+          port: options.webInventoryPort,
+          startOnLoad: true,
+          windowUpdateDebounceTime: 80
+        });
+        report.loaded.push("mineflayer-web-inventory");
+        report.webInventoryUrl = `http://127.0.0.1:${options.webInventoryPort}`;
+      } catch (error) {
+        report.failed.push({
+          name: "mineflayer-web-inventory",
+          reason: stringifyError(error)
+        });
+      }
+    } else {
+      report.failed.push({
+        name: "mineflayer-web-inventory",
+        reason: "module export is not callable"
+      });
     }
   }
 
@@ -62,14 +156,36 @@ export const loadMineflayerPlugins = (bot: Bot, options: PluginLoadOptions): voi
       (viewerModule as Record<string, unknown>).mineflayer;
 
     if (typeof mineflayerViewer === "function") {
-      (mineflayerViewer as (botValue: Bot, settings: { port: number; firstPerson: boolean }) => void)(bot, {
-        port: options.viewerPort,
-        firstPerson: false
+      try {
+        (mineflayerViewer as (botValue: Bot, settings: { port: number; firstPerson: boolean }) => void)(bot, {
+          port: options.viewerPort,
+          firstPerson: false
+        });
+        report.loaded.push("prismarine-viewer");
+      } catch (error) {
+        report.failed.push({
+          name: "prismarine-viewer",
+          reason: stringifyError(error)
+        });
+      }
+    } else {
+      report.failed.push({
+        name: "prismarine-viewer",
+        reason: "mineflayer viewer export not found"
       });
     }
   }
 
   if ((bot as Bot & { autoEat?: { enable: () => void } }).autoEat) {
-    (bot as Bot & { autoEat: { enable: () => void } }).autoEat.enable();
+    try {
+      (bot as Bot & { autoEat: { enable: () => void } }).autoEat.enable();
+    } catch (error) {
+      report.failed.push({
+        name: "mineflayer-auto-eat",
+        reason: `enable failed: ${stringifyError(error)}`
+      });
+    }
   }
+
+  return report;
 };

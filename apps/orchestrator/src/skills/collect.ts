@@ -5,7 +5,6 @@ import {
   countItem,
   equipBestToolForBlock,
   failure,
-  findNearestBlock,
   gotoCoordinates,
   withTimeout,
   success
@@ -81,27 +80,58 @@ const resolveCollectTarget = (ctx: SkillExecutionContext, rawTarget: string): Co
 const countInventoryItems = (ctx: SkillExecutionContext, itemNames: string[]): number =>
   [...new Set(itemNames)].reduce((sum, itemName) => sum + countItem(ctx, itemName), 0);
 
+const isBlockVisible = (ctx: SkillExecutionContext, block: any): boolean => {
+  if (!block) {
+    return false;
+  }
+  if (typeof ctx.bot.canSeeBlock !== "function") {
+    return true;
+  }
+  try {
+    return ctx.bot.canSeeBlock(block);
+  } catch {
+    return false;
+  }
+};
+
+const findCollectCandidates = (
+  ctx: SkillExecutionContext,
+  blockNames: string[],
+  maxDistance: number,
+  maxCount = 24
+): any[] => {
+  if (blockNames.length === 0) {
+    return [];
+  }
+
+  const blockNameSet = new Set(blockNames.map((name) => name.toLowerCase()));
+  const positions = ctx.bot.findBlocks({
+    matching: (candidate: any) => blockNameSet.has(String(candidate?.name ?? "").toLowerCase()),
+    maxDistance,
+    count: maxCount
+  });
+
+  return positions
+    .map((position: any) => ctx.bot.blockAt(position))
+    .filter((block: any) => block && block.name !== "air")
+    .sort(
+      (a: any, b: any) =>
+        ctx.bot.entity.position.distanceTo(a.position) - ctx.bot.entity.position.distanceTo(b.position)
+    );
+};
+
 const findNearestCollectBlock = (
   ctx: SkillExecutionContext,
   blockNames: string[],
   maxDistance: number
 ): any | null => {
-  let best: any | null = null;
-  let bestDistance = Number.POSITIVE_INFINITY;
-
-  for (const blockName of blockNames) {
-    const found = findNearestBlock(ctx, blockName, maxDistance);
-    if (!found) {
-      continue;
-    }
-    const distance = ctx.bot.entity.position.distanceTo(found.position);
-    if (distance < bestDistance) {
-      best = found;
-      bestDistance = distance;
+  const candidates = findCollectCandidates(ctx, blockNames, maxDistance);
+  for (const candidate of candidates) {
+    if (isBlockVisible(ctx, candidate)) {
+      return candidate;
     }
   }
-
-  return best;
+  return candidates[0] ?? null;
 };
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -180,6 +210,9 @@ const tryManualDig = async (ctx: SkillExecutionContext, block: any): Promise<"du
   if (!refreshed || refreshed.name === "air") {
     return "no_block";
   }
+  if (!isBlockVisible(ctx, refreshed)) {
+    return "no_block";
+  }
 
   if (typeof ctx.bot.canDigBlock === "function" && !ctx.bot.canDigBlock(refreshed)) {
     return "cannot_dig";
@@ -235,7 +268,7 @@ export const collectSkill = async (
   let lastErrorDetail = "";
 
   while (Date.now() < deadlineMs && after < desiredCount) {
-    const block = findNearestCollectBlock(ctx, target.searchBlocks, maxDistance);
+    let block = findNearestCollectBlock(ctx, target.searchBlocks, maxDistance);
     if (!block) {
       misses += 1;
       if (misses >= 3) {
@@ -243,6 +276,30 @@ export const collectSkill = async (
       }
       await new Promise((resolve) => setTimeout(resolve, 800));
       continue;
+    }
+
+    if (!isBlockVisible(ctx, block)) {
+      try {
+        await gotoCoordinates(
+          ctx,
+          block.position.x,
+          block.position.y,
+          block.position.z,
+          2,
+          12000
+        );
+      } catch {
+        misses += 1;
+        await wait(350);
+        continue;
+      }
+      const refreshed = ctx.bot.blockAt(block.position);
+      if (!refreshed || refreshed.name === "air" || !isBlockVisible(ctx, refreshed)) {
+        misses += 1;
+        await wait(350);
+        continue;
+      }
+      block = refreshed;
     }
 
     try {

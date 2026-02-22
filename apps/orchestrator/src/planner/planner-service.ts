@@ -141,7 +141,7 @@ export class PlannerService {
         if (attempt >= this.options.maxRetries) {
           break;
         }
-        await sleep(withJitter(300 * (attempt + 1)));
+        await sleep(withJitter(80 * (attempt + 1)));
       }
     }
 

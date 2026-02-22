@@ -122,7 +122,7 @@ const placeCraftingTableIfNeeded = async (ctx: SkillExecutionContext): Promise<a
   let table = findNearestBlock(ctx, "crafting_table", 24);
   if (table) {
     try {
-      await gotoCoordinates(ctx, table.position.x, table.position.y, table.position.z, 3, 15000);
+      await gotoCoordinates(ctx, table.position.x, table.position.y, table.position.z, 3, 8000);
     } catch {
       // If movement fails we'll still try local placement fallback.
     }
@@ -170,7 +170,7 @@ const placeCraftingTableIfNeeded = async (ctx: SkillExecutionContext): Promise<a
   }
 
   try {
-    await gotoCoordinates(ctx, targetPos.x, targetPos.y, targetPos.z, 3, 15000);
+    await gotoCoordinates(ctx, targetPos.x, targetPos.y, targetPos.z, 3, 8000);
   } catch {
     return null;
   }

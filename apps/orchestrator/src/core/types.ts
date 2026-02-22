@@ -2,7 +2,6 @@ import type { ActionHistoryEntry, PlannerSubgoal } from "../../../../contracts/p
 import type { FailureCode } from "../../../../contracts/skills";
 
 export type PlannerTrigger =
-  | "IDLE"
   | "SUBGOAL_COMPLETED"
   | "SUBGOAL_FAILED"
   | "ATTACKED"

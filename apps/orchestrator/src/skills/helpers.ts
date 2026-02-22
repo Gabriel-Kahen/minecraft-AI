@@ -115,7 +115,7 @@ export const gotoCoordinates = async (
   const pathfinderModule = getPathfinderModule();
   const goal = new pathfinderModule.goals.GoalNear(Math.floor(x), Math.floor(y), Math.floor(z), range);
   const distance = ctx.bot.entity.position.distanceTo(target);
-  const computedTimeoutMs = Math.min(90000, Math.max(timeoutMs, 8000 + Math.round(distance * 1200)));
+  const computedTimeoutMs = Math.min(45000, Math.max(timeoutMs, 2500 + Math.round(distance * 500)));
   await new Promise<void>((resolve, reject) => {
     let settled = false;
     let noPathEvents = 0;
@@ -221,7 +221,7 @@ export const gotoCoordinates = async (
       }
 
       const stalledForMs = Date.now() - lastMoveAt;
-      if (stalledForMs >= 12000) {
+      if (stalledForMs >= 4500) {
         settle(
           () =>
             reject(
@@ -230,7 +230,7 @@ export const gotoCoordinates = async (
           true
         );
       }
-    }, 1000);
+    }, 400);
 
     ctx.bot.on("goal_reached", onGoalReached);
     ctx.bot.on("path_reset", onPathReset);

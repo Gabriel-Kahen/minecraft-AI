@@ -153,7 +153,7 @@ export class ReflexManager {
       } else {
         this.stuckCounter = 0;
       }
-    }, 1000);
+    }, 500);
 
     this.interval.unref();
   }

@@ -19,18 +19,48 @@ import type { SQLiteStore, JsonlLogger } from "../store";
 import { ReflexManager } from "../reflex";
 import { SkillEngine } from "../skills";
 import type { AppConfig } from "../config";
+import { inspect } from "node:util";
 
 const formatDisconnectReason = (reason: unknown): string => {
   if (typeof reason === "string") {
     return reason;
   }
 
-  try {
-    const json = JSON.stringify(reason);
-    return json ?? String(reason);
-  } catch {
-    return String(reason);
+  if (reason === null || reason === undefined) {
+    return "unknown";
   }
+
+  try {
+    const seen = new WeakSet<object>();
+    const json = JSON.stringify(reason, (_key, value) => {
+      if (typeof value === "bigint") {
+        return value.toString();
+      }
+      if (typeof value === "object" && value !== null) {
+        if (seen.has(value)) {
+          return "[Circular]";
+        }
+        seen.add(value);
+      }
+      return value;
+    });
+    if (json && json !== "{}") {
+      return json;
+    }
+  } catch {
+    // fall through to inspect/String below
+  }
+
+  try {
+    const rendered = inspect(reason, { depth: 4, maxArrayLength: 30, breakLength: 140 });
+    if (rendered && rendered !== "[object Object]") {
+      return rendered;
+    }
+  } catch {
+    // fall through to String below
+  }
+
+  return String(reason);
 };
 
 export interface BotControllerDependencies {
@@ -69,8 +99,6 @@ export class BotController {
   private stopped = false;
 
   private reconnectPending = false;
-
-  private lastPlanAt = 0;
 
   private plannerInFlight = false;
 
@@ -120,7 +148,7 @@ export class BotController {
       lastError: null,
       busy: false,
       plannerCooldownUntil: 0,
-      pendingTriggers: ["IDLE"],
+      pendingTriggers: [],
       history: []
     };
     this.reflexManager = new ReflexManager({
@@ -347,7 +375,7 @@ export class BotController {
       if (typeof bot.collectBlock?.cancelTask === "function") {
         await Promise.race([
           bot.collectBlock.cancelTask(),
-          sleep(350)
+          sleep(120)
         ]);
       }
     } catch {
@@ -574,6 +602,34 @@ export class BotController {
       }
     });
 
+    bot.on("diggingCompleted", () => {
+      if (this.bot !== bot || this.stopped) {
+        return;
+      }
+      this.markActivity();
+    });
+
+    bot.on("diggingAborted", () => {
+      if (this.bot !== bot || this.stopped) {
+        return;
+      }
+      this.markActivity();
+    });
+
+    bot.on("windowOpen", () => {
+      if (this.bot !== bot || this.stopped) {
+        return;
+      }
+      this.markActivity();
+    });
+
+    bot.on("windowClose", () => {
+      if (this.bot !== bot || this.stopped) {
+        return;
+      }
+      this.markActivity();
+    });
+
     bot.on("error", (error: unknown) => {
       if (this.bot !== bot || this.stopped) {
         return;
@@ -653,7 +709,7 @@ export class BotController {
     this.pushTrigger("RECONNECT", { reason: `scheduled_${reason}` });
     this.deps.metrics.recordReconnect(this.botId);
     const timeoutRelated = detail?.includes("disconnect.timeout") || detail?.includes("Timed out");
-    const streakPenaltyMs = Math.min(this.disconnectStreak, 6) * (timeoutRelated ? 6000 : 3000);
+    const streakPenaltyMs = Math.min(this.disconnectStreak, 6) * (timeoutRelated ? 2500 : 1200);
     const delayMs =
       this.deps.config.RECONNECT_BASE_DELAY_MS +
       Math.floor(Math.random() * this.deps.config.RECONNECT_JITTER_MS) +
@@ -793,19 +849,28 @@ export class BotController {
     }
 
     const subgoalElapsedMs = now - this.currentSubgoalStartedAtMs;
-    if (subgoalElapsedMs < 7000) {
+    const inactiveForMs = now - this.lastActivityAtMs;
+    if (inactiveForMs < this.deps.config.SUBGOAL_IDLE_STALL_MS) {
       return;
     }
 
-    const inactiveForMs = now - this.lastActivityAtMs;
-    if (inactiveForMs < this.deps.config.SUBGOAL_IDLE_STALL_MS) {
+    const pathfinder = this.bot.pathfinder;
+    const pathfinderActive =
+      Boolean(pathfinder) &&
+      ((typeof pathfinder.isMoving === "function" && pathfinder.isMoving()) ||
+        (typeof pathfinder.isMining === "function" && pathfinder.isMining()) ||
+        (typeof pathfinder.isBuilding === "function" && pathfinder.isBuilding()));
+    const hasOpenWindow = Boolean(this.bot.currentWindow);
+    if (pathfinderActive || hasOpenWindow) {
       return;
     }
 
     this.log("SUBGOAL_IDLE_STALL", {
       subgoal: this.taskState.currentSubgoal.name,
       inactive_ms: inactiveForMs,
-      elapsed_ms: subgoalElapsedMs
+      elapsed_ms: subgoalElapsedMs,
+      pathfinder_active: pathfinderActive,
+      has_open_window: hasOpenWindow
     });
     this.maybeChatTaskEvent(
       `[task] ${this.botId} stalled ${this.subgoalSummary(this.taskState.currentSubgoal)} inactive ${Math.round(
@@ -822,6 +887,61 @@ export class BotController {
     }
   }
 
+  private maybeHandleNonBusyInactivity(now: number): void {
+    if (this.taskState.busy || !this.bot) {
+      return;
+    }
+
+    const inactiveForMs = now - this.lastActivityAtMs;
+    if (inactiveForMs < this.deps.config.SUBGOAL_IDLE_STALL_MS) {
+      return;
+    }
+
+    if (this.taskState.queue.length === 0) {
+      this.log("IDLE_NO_WORK_RECOVERY", {
+        inactive_ms: inactiveForMs
+      });
+      this.enqueueAlwaysActiveSubgoal(now);
+      if (this.taskState.queue.length === 0) {
+        this.taskState.queue.unshift(
+          this.runtimeSubgoal({
+            name: "explore",
+            params: { radius: 16, return_to_base: false },
+            success_criteria: { explored_points_min: 1 }
+          })
+        );
+        this.log("IDLE_EMERGENCY_SUBGOAL_ENQUEUED", {
+          subgoal: "explore"
+        });
+      }
+      this.markActivity();
+      return;
+    }
+
+    const readyIndex = this.taskState.queue.findIndex(
+      (candidate) => (candidate.notBeforeMs ?? 0) <= now
+    );
+    if (readyIndex >= 0) {
+      return;
+    }
+
+    let earliest: RuntimeSubgoal | null = null;
+    for (const candidate of this.taskState.queue) {
+      if (!earliest || (candidate.notBeforeMs ?? 0) < (earliest.notBeforeMs ?? 0)) {
+        earliest = candidate;
+      }
+    }
+
+    if (earliest) {
+      earliest.notBeforeMs = now;
+      this.log("IDLE_RETRY_BYPASS", {
+        subgoal: earliest.name,
+        inactive_ms: inactiveForMs
+      });
+      this.markActivity();
+    }
+  }
+
   private async tick(): Promise<void> {
     if (this.stopped || !this.bot || !this.connected) {
       return;
@@ -835,7 +955,7 @@ export class BotController {
       const hasStuckTrigger = this.taskState.pendingTriggers.includes("STUCK");
       if (hasStuckTrigger && this.currentSubgoalStartedAtMs > 0) {
         const elapsedMs = now - this.currentSubgoalStartedAtMs;
-        if (elapsedMs >= 25000 && now - this.lastStuckTriggerAtMs >= 12000) {
+        if (elapsedMs >= 12000 && now - this.lastStuckTriggerAtMs >= 4000) {
           this.lastStuckTriggerAtMs = now;
           const currentSubgoal = this.taskState.currentSubgoal;
           const currentLabel = currentSubgoal ? this.subgoalSummary(currentSubgoal) : "subgoal";
@@ -862,13 +982,11 @@ export class BotController {
       return;
     }
 
-    if (this.taskState.queue.length > 0) {
-      await this.executeNextSubgoal();
-      return;
-    }
+    this.maybeHandleNonBusyInactivity(now);
 
-    if (now - this.lastPlanAt > this.deps.config.IDLE_TRIGGER_MS && !this.taskState.pendingTriggers.includes("IDLE")) {
-      this.taskState.pendingTriggers.push("IDLE");
+    if (this.taskState.queue.length > 0) {
+      await this.executeReadySubgoals();
+      return;
     }
 
     const shouldPlan =
@@ -881,13 +999,28 @@ export class BotController {
       }
       await this.requestPlan(freshSnapshot);
       if (!this.taskState.busy && this.taskState.queue.length > 0) {
-        await this.executeNextSubgoal();
+        await this.executeReadySubgoals();
         return;
       }
     }
 
     if (this.taskState.queue.length === 0) {
       this.enqueueAlwaysActiveSubgoal(now);
+      if (this.taskState.queue.length > 0) {
+        await this.executeReadySubgoals();
+      }
+    }
+  }
+
+  private async executeReadySubgoals(maxRuns = 2): Promise<void> {
+    for (let run = 0; run < maxRuns; run += 1) {
+      if (this.stopped || !this.bot || !this.connected || this.taskState.busy || this.taskState.queue.length === 0) {
+        return;
+      }
+      const executed = await this.executeNextSubgoal();
+      if (!executed) {
+        return;
+      }
     }
   }
 
@@ -1013,7 +1146,6 @@ export class BotController {
       );
       this.taskState.queue = guarded.subgoals.map((subgoal) => this.runtimeSubgoal(subgoal));
       this.taskState.pendingTriggers = [];
-      this.lastPlanAt = Date.now();
       this.maybeChatTaskEvent(
         `[plan] ${this.botId} ${this.shortenForChat(
           this.taskState.currentGoal ?? "goal"
@@ -1075,9 +1207,9 @@ export class BotController {
     }
   }
 
-  private async executeNextSubgoal(): Promise<void> {
+  private async executeNextSubgoal(): Promise<boolean> {
     if (!this.deps.skillLimiter.tryEnter(this.botId)) {
-      return;
+      return false;
     }
 
     const nowMs = Date.now();
@@ -1086,13 +1218,13 @@ export class BotController {
     );
     if (nextReadyIndex < 0) {
       this.deps.skillLimiter.leave(this.botId);
-      return;
+      return false;
     }
 
     const [subgoal] = this.taskState.queue.splice(nextReadyIndex, 1);
     if (!subgoal || !this.bot) {
       this.deps.skillLimiter.leave(this.botId);
-      return;
+      return false;
     }
 
     await this.clearResidualActions();
@@ -1100,6 +1232,7 @@ export class BotController {
     this.taskState.currentSubgoal = subgoal;
     this.currentSubgoalStartedAtMs = Date.now();
     this.currentSubgoalTimeoutHandled = false;
+    this.markActivity();
     const startedAtMs = Date.now();
     const startedAt = nowIso();
     const inventoryBefore = this.inventoryCounts();
@@ -1286,6 +1419,7 @@ export class BotController {
       this.currentSubgoalTimeoutHandled = false;
       this.deps.skillLimiter.leave(this.botId);
     }
+    return true;
   }
 
   private runtimeSubgoal(subgoal: PlannerSubgoal): RuntimeSubgoal {

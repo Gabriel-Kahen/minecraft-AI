@@ -117,8 +117,8 @@ export const gotoNearestSkill = async (
     candidates.push(fallback);
   }
 
-  const perCandidateTimeoutMs = Math.max(6000, Math.floor(Number(params.attempt_timeout_ms ?? 10000)));
-  const maxCandidates = Math.max(1, Math.floor(Number(params.max_candidates ?? 8)));
+  const perCandidateTimeoutMs = Math.max(4000, Math.floor(Number(params.attempt_timeout_ms ?? 7000)));
+  const maxCandidates = Math.max(1, Math.floor(Number(params.max_candidates ?? 4)));
   const cappedCandidates = candidates.slice(0, maxCandidates);
   let lastError: unknown = null;
 

@@ -27,10 +27,10 @@ export const combatGuardSkill = async (
     if (target) {
       pvp.attack(target);
       engagements += 1;
-      await new Promise((resolve) => setTimeout(resolve, 700));
+      await new Promise((resolve) => setTimeout(resolve, 300));
     } else {
       pvp.stop();
-      await new Promise((resolve) => setTimeout(resolve, 350));
+      await new Promise((resolve) => setTimeout(resolve, 150));
     }
   }
 

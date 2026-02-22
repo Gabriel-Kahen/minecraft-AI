@@ -41,7 +41,7 @@ const sweepCombatDrops = async (ctx: SkillExecutionContext): Promise<void> => {
     }
     try {
       await gotoCoordinates(ctx, drop.position.x, drop.position.y, drop.position.z, 1, 6000);
-      await wait(250);
+      await wait(100);
     } catch {
       return;
     }
@@ -100,7 +100,7 @@ export const combatEngageSkill = async (
             resolve();
           }
         }
-      }, 300);
+      }, 150);
       const timeout = setTimeout(() => {
         if (!finished) {
           finished = true;

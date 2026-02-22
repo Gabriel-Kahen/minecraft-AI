@@ -236,7 +236,7 @@ const nearbyDroppedItemEntities = (
 const waitForDropCollectedOrGone = async (
   ctx: SkillExecutionContext,
   dropId: number,
-  timeoutMs = 1800
+  timeoutMs = 900
 ): Promise<boolean> =>
   new Promise<boolean>((resolve) => {
     let settled = false;
@@ -278,7 +278,7 @@ const waitForDropCollectedOrGone = async (
       if (!refreshed) {
         settle(true);
       }
-    }, 120);
+    }, 80);
 
     timeoutTimer = setTimeout(() => settle(false), timeoutMs);
     ctx.bot.on("playerCollect", onPlayerCollect);
@@ -288,7 +288,7 @@ const waitForInventoryGain = async (
   ctx: SkillExecutionContext,
   itemNames: string[],
   beforeCount: number,
-  timeoutMs = 2200
+  timeoutMs = 1200
 ): Promise<number> => {
   const startedAt = Date.now();
   let current = countInventoryItems(ctx, itemNames);
@@ -296,13 +296,13 @@ const waitForInventoryGain = async (
     if (current > beforeCount) {
       return current;
     }
-    await wait(120);
+    await wait(80);
     current = countInventoryItems(ctx, itemNames);
   }
   return current;
 };
 
-const nudgeToward = async (ctx: SkillExecutionContext, position: any, durationMs = 700): Promise<void> => {
+const nudgeToward = async (ctx: SkillExecutionContext, position: any, durationMs = 350): Promise<void> => {
   try {
     await ctx.bot.lookAt(position, true);
   } catch {
@@ -362,16 +362,16 @@ const sweepNearbyDrops = async (
             drop.position.y,
             drop.position.z,
             1,
-            7000
+            4000
           );
         } catch {
-          await nudgeToward(ctx, drop.position, 850);
+          await nudgeToward(ctx, drop.position, 450);
         }
-        const collected = await waitForDropCollectedOrGone(ctx, drop.id, 1800);
+        const collected = await waitForDropCollectedOrGone(ctx, drop.id, 900);
         if (collected) {
           progressed = true;
         }
-        await wait(120);
+        await wait(60);
       } catch {
         continue;
       }
@@ -383,7 +383,7 @@ const sweepNearbyDrops = async (
     }
 
     if (!progressed) {
-      await wait(350);
+      await wait(120);
       seenDropIds.clear();
     }
   }
@@ -414,7 +414,7 @@ const clearLineOfSightToBlock = async (
     }
 
     try {
-      await gotoCoordinates(ctx, obstruction.position.x, obstruction.position.y, obstruction.position.z, 3, 9000);
+      await gotoCoordinates(ctx, obstruction.position.x, obstruction.position.y, obstruction.position.z, 3, 4500);
     } catch {
       return "blocked";
     }
@@ -431,7 +431,7 @@ const clearLineOfSightToBlock = async (
     try {
       await equipBestToolForBlock(ctx, digTarget, false);
       await ctx.bot.dig(digTarget, true);
-      await wait(450);
+      await wait(180);
       await sweepNearbyDrops(ctx, 10, 3, expectedItems, digTarget.position);
     } catch {
       return "blocked";
@@ -462,7 +462,7 @@ const tryManualDig = async (
   expectedItems: string[]
 ): Promise<CollectManualResult> => {
   try {
-    await gotoCoordinates(ctx, block.position.x, block.position.y, block.position.z, 3, 15000);
+    await gotoCoordinates(ctx, block.position.x, block.position.y, block.position.z, 3, 8000);
   } catch {
     return "no_block";
   }
@@ -496,9 +496,9 @@ const tryManualDig = async (
         throw error;
       }
     }
-    await wait(1100);
+    await wait(280);
     await sweepNearbyDrops(ctx, 12, 8, expectedItems, refreshed.position);
-    await waitForInventoryGain(ctx, expectedItems, beforeCount, 2200);
+    await waitForInventoryGain(ctx, expectedItems, beforeCount, 1200);
     return "dug";
   } catch {
     return "no_block";
@@ -537,7 +537,7 @@ export const collectSkill = async (
   }
 
   const deadlineMs = Date.now() + Math.max(15000, Number(params.timeout_ms ?? 90000));
-  const perAttemptTimeoutMs = Math.max(5000, Number(params.attempt_timeout_ms ?? 15000));
+  const perAttemptTimeoutMs = Math.max(3000, Number(params.attempt_timeout_ms ?? 9000));
   const missLimit = Math.max(3, Math.floor(Number(params.miss_limit ?? 8) || 8));
   const noProgressLimit = Math.max(3, Math.floor(Number(params.no_progress_limit ?? 10) || 10));
   const maxAttempts = Math.max(12, desiredCount * 6);
@@ -555,7 +555,7 @@ export const collectSkill = async (
       if (misses >= missLimit) {
         break;
       }
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      await new Promise((resolve) => setTimeout(resolve, 200));
       continue;
     }
 
@@ -567,17 +567,17 @@ export const collectSkill = async (
           block.position.y,
           block.position.z,
           2,
-          12000
+          6000
         );
       } catch {
         misses += 1;
-        await wait(350);
+        await wait(120);
         continue;
       }
       const refreshed = ctx.bot.blockAt(block.position);
       if (!refreshed || refreshed.name === "air") {
         misses += 1;
-        await wait(350);
+        await wait(120);
         continue;
       }
       if (!isBlockVisible(ctx, refreshed)) {
@@ -591,13 +591,13 @@ export const collectSkill = async (
         if (!postClear || postClear.name === "air") {
           misses += 1;
           failedCandidateCounts.set(positionKey(refreshed.position), (failedCandidateCounts.get(positionKey(refreshed.position)) ?? 0) + 1);
-          await wait(350);
+          await wait(120);
           continue;
         }
         if (losResult !== "visible" && !isBlockVisible(ctx, postClear)) {
           misses += 1;
           failedCandidateCounts.set(positionKey(postClear.position), (failedCandidateCounts.get(positionKey(postClear.position)) ?? 0) + 1);
-          await wait(350);
+          await wait(120);
           continue;
         }
         block = postClear;
@@ -626,7 +626,7 @@ export const collectSkill = async (
           after = countInventoryItems(ctx, target.inventoryItems);
           if (after <= beforeAttempt) {
             await sweepNearbyDrops(ctx, 12, 8, target.inventoryItems, block.position);
-            after = await waitForInventoryGain(ctx, target.inventoryItems, beforeAttempt, 2200);
+            after = await waitForInventoryGain(ctx, target.inventoryItems, beforeAttempt, 1200);
           }
           if (after <= beforeAttempt) {
             noProgressAttempts += 1;
@@ -644,7 +644,7 @@ export const collectSkill = async (
 
       await withTimeout(collector([block]), perAttemptTimeoutMs);
       await sweepNearbyDrops(ctx, 12, 8, target.inventoryItems, block.position);
-      await wait(300);
+      await wait(80);
       attempts += 1;
       misses = 0;
       after = countInventoryItems(ctx, target.inventoryItems);
@@ -660,7 +660,7 @@ export const collectSkill = async (
         }
         if (manualResult === "dug") {
           await sweepNearbyDrops(ctx, 12, 8, target.inventoryItems, block.position);
-          after = await waitForInventoryGain(ctx, target.inventoryItems, beforeAttempt, 2200);
+          after = await waitForInventoryGain(ctx, target.inventoryItems, beforeAttempt, 1200);
         }
       }
 
@@ -708,11 +708,11 @@ export const collectSkill = async (
       }
       if (manualResult === "dug") {
         await sweepNearbyDrops(ctx, 12, 8, target.inventoryItems, block.position);
-        await wait(300);
+        await wait(80);
         attempts += 1;
         misses = 0;
         const beforeManualCount = after;
-        after = await waitForInventoryGain(ctx, target.inventoryItems, beforeManualCount, 2200);
+        after = await waitForInventoryGain(ctx, target.inventoryItems, beforeManualCount, 1200);
         if (after <= beforeManualCount) {
           noProgressAttempts += 1;
           failedCandidateCounts.set(positionKey(block.position), (failedCandidateCounts.get(positionKey(block.position)) ?? 0) + 1);
@@ -737,7 +737,7 @@ export const collectSkill = async (
       if (noProgressAttempts >= noProgressLimit) {
         break;
       }
-      await new Promise((resolve) => setTimeout(resolve, 600));
+      await new Promise((resolve) => setTimeout(resolve, 180));
     }
   }
 

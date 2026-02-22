@@ -16,7 +16,7 @@ export const gotoSkill = async (
   }
 
   try {
-    await gotoCoordinates(ctx, x, y, z, range, 30000);
+    await gotoCoordinates(ctx, x, y, z, range, 20000);
     return success(`arrived near ${x},${y},${z}`);
   } catch (error) {
     return asSkillFailure(error, "PATHFIND_FAILED");

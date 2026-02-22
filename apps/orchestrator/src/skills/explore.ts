@@ -13,7 +13,7 @@ export const exploreSkill = async (
   const radius = Number(params.radius ?? 28);
   const returnToBase = Boolean(params.return_to_base ?? false);
   const maxWaypoints = Math.max(1, Math.floor(Number(params.max_waypoints ?? 3)));
-  const waypointTimeoutMs = Math.max(7000, Math.floor(Number(params.attempt_timeout_ms ?? 18000)));
+  const waypointTimeoutMs = Math.max(5000, Math.floor(Number(params.attempt_timeout_ms ?? 12000)));
   const origin = ctx.bot.entity.position.clone();
   let waypointsCompleted = 0;
   let lastError: unknown = null;
@@ -39,7 +39,7 @@ export const exploreSkill = async (
     }
 
     if (returnToBase) {
-      await gotoCoordinates(ctx, ctx.base.x, ctx.base.y, ctx.base.z, ctx.base.radius, 30000);
+      await gotoCoordinates(ctx, ctx.base.x, ctx.base.y, ctx.base.z, ctx.base.radius, 15000);
     }
     return success("exploration waypoint completed", { waypoints: waypointsCompleted });
   } catch (error) {

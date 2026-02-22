@@ -3,6 +3,7 @@ import path from "node:path";
 import { Vec3 } from "vec3";
 import type { SkillFailure, SkillResultV1, SkillSuccess } from "../../../../contracts/skills";
 import type { SkillExecutionContext } from "./context";
+import { getMcData } from "../utils/mc-data";
 
 export const success = (details: string, metrics?: Record<string, number>): SkillSuccess => ({
   outcome: "SUCCESS",
@@ -43,9 +44,16 @@ export const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number): Pr
   }
 };
 
+let pathfinderModuleCache: any | null = null;
+const movementCache = new WeakMap<any, { version: string; movements: any }>();
+
 const getPathfinderModule = (): any => {
+  if (pathfinderModuleCache) {
+    return pathfinderModuleCache;
+  }
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  return require("mineflayer-pathfinder");
+  pathfinderModuleCache = require("mineflayer-pathfinder");
+  return pathfinderModuleCache;
 };
 
 const ensureMovements = (ctx: SkillExecutionContext): void => {
@@ -53,9 +61,15 @@ const ensureMovements = (ctx: SkillExecutionContext): void => {
     throw failure("DEPENDS_ON_ITEM", "pathfinder plugin not loaded", false);
   }
 
-  const mcData = require("minecraft-data")(ctx.bot.version);
+  const cached = movementCache.get(ctx.bot);
+  if (cached && cached.version === ctx.bot.version) {
+    return;
+  }
+
+  const mcData = getMcData(ctx.bot.version);
   const pathfinderModule = getPathfinderModule();
   const movements = new pathfinderModule.Movements(ctx.bot, mcData);
+  movementCache.set(ctx.bot, { version: ctx.bot.version, movements });
   ctx.bot.pathfinder.setMovements(movements);
 };
 
@@ -71,10 +85,13 @@ export const gotoCoordinates = async (
 
   const pathfinderModule = getPathfinderModule();
   const goal = new pathfinderModule.goals.GoalNear(Math.floor(x), Math.floor(y), Math.floor(z), range);
+  const distance = ctx.bot.entity.position.distanceTo(new Vec3(x, y, z));
+  const computedTimeoutMs = Math.min(90000, Math.max(timeoutMs, 8000 + Math.round(distance * 1200)));
 
   await withTimeout(
     new Promise<void>((resolve, reject) => {
       let settled = false;
+      let noPathEvents = 0;
 
       const cleanup = (): void => {
         ctx.bot.removeListener("goal_reached", onGoalReached);
@@ -94,7 +111,10 @@ export const gotoCoordinates = async (
       const onGoalReached = (): void => settle(resolve);
       const onPathReset = (reason: string): void => {
         if (reason === "noPath") {
-          settle(() => reject(failure("PATHFIND_FAILED", "pathfinder reported no path")));
+          noPathEvents += 1;
+          if (noPathEvents >= 3) {
+            settle(() => reject(failure("PATHFIND_FAILED", "pathfinder reported no path")));
+          }
         }
       };
       const onError = (err: unknown): void =>
@@ -105,7 +125,7 @@ export const gotoCoordinates = async (
       ctx.bot.once("error", onError);
       ctx.bot.pathfinder.setGoal(goal);
     }),
-    timeoutMs
+    computedTimeoutMs
   ).catch((err) => {
     if (typeof err === "object" && err && "errorCode" in err) {
       throw err;
@@ -115,7 +135,7 @@ export const gotoCoordinates = async (
 };
 
 export const findNearestBlock = (ctx: SkillExecutionContext, blockName: string, maxDistance = 48): any => {
-  const mcData = require("minecraft-data")(ctx.bot.version);
+  const mcData = getMcData(ctx.bot.version);
   const blockDef = mcData.blocksByName[blockName];
   if (!blockDef) {
     return null;

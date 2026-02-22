@@ -14,6 +14,8 @@ const envSchema = z.object({
   BOT_PASSWORD: z.string().optional().default(""),
   ORCH_TICK_MS: z.coerce.number().int().min(100).default(1000),
   SNAPSHOT_REFRESH_MS: z.coerce.number().int().min(1000).default(5000),
+  SNAPSHOT_NEARBY_CACHE_MS: z.coerce.number().int().min(0).default(2500),
+  SNAPSHOT_NEARBY_RESCAN_DISTANCE: z.coerce.number().min(0).default(4),
   BOT_START_STAGGER_MS: z.coerce.number().int().min(0).default(2500),
   RECONNECT_BASE_DELAY_MS: z.coerce.number().int().min(1000).default(12000),
   RECONNECT_JITTER_MS: z.coerce.number().int().min(0).default(8000),
@@ -23,7 +25,7 @@ const envSchema = z.object({
     .optional()
     .transform((value) => value !== "false"),
   ALWAYS_ACTIVE_REQUEUE_MS: z.coerce.number().int().min(500).default(2500),
-  SUBGOAL_RETRY_LIMIT: z.coerce.number().int().min(0).max(5).default(2),
+  SUBGOAL_RETRY_LIMIT: z.coerce.number().int().min(0).max(8).default(4),
   CHAT_STATUS_ENABLED: z
     .string()
     .optional()

@@ -1,6 +1,7 @@
 import type { SkillResultV1 } from "../../../../contracts/skills";
 import type { SkillExecutionContext } from "./context";
 import { asSkillFailure, countItem, failure, findNearestBlock, success } from "./helpers";
+import { getMcData } from "../utils/mc-data";
 
 interface CollectTargetSpec {
   searchBlocks: string[];
@@ -12,7 +13,7 @@ const dedupe = (values: string[]): string[] => [...new Set(values)];
 
 const resolveCollectTarget = (ctx: SkillExecutionContext, rawTarget: string): CollectTargetSpec => {
   const target = rawTarget.trim().toLowerCase();
-  const mcData = require("minecraft-data")(ctx.bot.version);
+  const mcData = getMcData(ctx.bot.version);
   const searchBlocks: string[] = [];
   const inventoryItems: string[] = [];
 
@@ -124,23 +125,49 @@ export const collectSkill = async (
     return failure("DEPENDS_ON_ITEM", "collectblock plugin unavailable", false);
   }
 
-  const block = findNearestCollectBlock(ctx, target.searchBlocks, maxDistance);
-  if (!block) {
-    return failure("RESOURCE_NOT_FOUND", `could not find ${target.label}`, true);
+  const deadlineMs = Date.now() + Math.max(15000, Number(params.timeout_ms ?? 90000));
+  let after = current;
+  let attempts = 0;
+  let misses = 0;
+
+  while (Date.now() < deadlineMs && after < desiredCount) {
+    const block = findNearestCollectBlock(ctx, target.searchBlocks, maxDistance);
+    if (!block) {
+      misses += 1;
+      if (misses >= 3) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      continue;
+    }
+
+    try {
+      await collector([block]);
+      attempts += 1;
+      misses = 0;
+      after = countInventoryItems(ctx, target.inventoryItems);
+      if (attempts >= Math.max(6, desiredCount * 3) && after <= current) {
+        break;
+      }
+    } catch (error) {
+      const mapped = asSkillFailure(error, "RESOURCE_NOT_FOUND");
+      if (!mapped.retryable) {
+        return mapped;
+      }
+      attempts += 1;
+      if (attempts >= Math.max(6, desiredCount * 3)) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    }
   }
 
-  try {
-    await collector([block]);
-    const after = countInventoryItems(ctx, target.inventoryItems);
-    if (after < desiredCount) {
-      return failure(
-        "RESOURCE_NOT_FOUND",
-        `collected but below target: ${after}/${desiredCount} ${target.label}`,
-        true
-      );
-    }
-    return success(`collected ${target.label} to ${after}`, { gathered: after - current });
-  } catch (error) {
-    return asSkillFailure(error, "RESOURCE_NOT_FOUND");
+  if (after < desiredCount) {
+    return failure(
+      "RESOURCE_NOT_FOUND",
+      `collected ${after}/${desiredCount} ${target.label} before timeout`,
+      true
+    );
   }
+  return success(`collected ${target.label} to ${after}`, { gathered: after - current });
 };

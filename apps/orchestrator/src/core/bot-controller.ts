@@ -201,6 +201,67 @@ export class BotController {
     }
   }
 
+  private subgoalExecutionSteps(subgoal: RuntimeSubgoal | PlannerSubgoal): string[] {
+    const params = subgoal.params ?? {};
+    switch (subgoal.name) {
+      case "craft": {
+        const item = String(params.item ?? params.output ?? params.result ?? params.type ?? "item");
+        const count = Number(params.count ?? params.amount ?? params.qty ?? 1);
+        return [
+          `check/craft prerequisites for ${item}`,
+          "ensure crafting table is available (nearby or inventory)",
+          "place and use crafting table if recipe requires it",
+          `craft ${item} until inventory gains ${count}`
+        ];
+      }
+      case "collect": {
+        const target = String(
+          params.item ?? params.block ?? params.resource ?? params.resource_type ?? params.type ?? "resource"
+        );
+        const count = Number(params.count ?? params.amount ?? params.qty ?? 1);
+        return [
+          `locate nearest source block for ${target}`,
+          "pathfind to source and mine/collect",
+          `repeat until target count ${count} is reached`
+        ];
+      }
+      case "goto_nearest": {
+        const target = String(params.block ?? params.resource ?? params.resource_type ?? params.type ?? "target");
+        return [
+          `scan nearby world for ${target}`,
+          "pathfind to closest valid block",
+          "stop once within interaction range"
+        ];
+      }
+      case "goto":
+        return ["compute destination point", "pathfind with retries", "confirm in-range arrival"];
+      case "smelt":
+        return [
+          "ensure smelting inputs and fuel exist",
+          "ensure furnace is available",
+          "smelt until requested count is reached"
+        ];
+      case "build_blueprint":
+        return [
+          "load generated blueprint file",
+          "for each placement: move, orient, place",
+          "verify placements and stop on placement failure"
+        ];
+      case "explore":
+        return ["pick exploration waypoint", "pathfind to waypoint", "continue scanning for resources/threats"];
+      case "deposit":
+        return ["navigate to base chest", "open container", "deposit items by policy"];
+      case "withdraw":
+        return ["navigate to base chest", "open container", "withdraw requested items"];
+      case "combat_engage":
+        return ["acquire hostile target", "engage with pvp controls", "disengage when area is safe"];
+      case "combat_guard":
+        return ["hold guard radius", "monitor nearby hostiles", "interrupt and engage threats"];
+      default:
+        return ["execute deterministic skill handler"];
+    }
+  }
+
   taskSummary(): string {
     if (!this.connected) {
       return "offline";
@@ -243,6 +304,33 @@ export class BotController {
     }
     this.lastTaskEventChatAtMs = nowMs;
     this.chat(message.slice(0, 240));
+  }
+
+  private inventoryCounts(): Record<string, number> {
+    if (!this.bot?.inventory?.items) {
+      return {};
+    }
+    const counts: Record<string, number> = {};
+    const items: Array<{ name: string; count: number }> = this.bot.inventory.items();
+    for (const item of items) {
+      counts[item.name] = (counts[item.name] ?? 0) + item.count;
+    }
+    return counts;
+  }
+
+  private inventoryDelta(
+    before: Record<string, number>,
+    after: Record<string, number>
+  ): Record<string, number> | undefined {
+    const delta: Record<string, number> = {};
+    const names = new Set<string>([...Object.keys(before), ...Object.keys(after)]);
+    for (const name of names) {
+      const change = (after[name] ?? 0) - (before[name] ?? 0);
+      if (change !== 0) {
+        delta[name] = change;
+      }
+    }
+    return Object.keys(delta).length > 0 ? delta : undefined;
   }
 
   async start(): Promise<void> {
@@ -530,7 +618,11 @@ export class BotController {
     }
 
     try {
-      const snapshot = buildSnapshot(this.bot, this.botId, this.taskState);
+      const snapshot = buildSnapshot(this.bot, this.botId, this.taskState, {
+        nowMs,
+        nearbyCacheMs: this.deps.config.SNAPSHOT_NEARBY_CACHE_MS,
+        nearbyRescanDistance: this.deps.config.SNAPSHOT_NEARBY_RESCAN_DISTANCE
+      });
       this.lastSnapshot = snapshot;
       this.lastSnapshotAtMs = nowMs;
       this.deps.store.upsertBotSnapshot(this.botId, snapshot, nowIso());
@@ -662,12 +754,21 @@ export class BotController {
     this.taskState.currentSubgoal = subgoal;
     const startedAtMs = Date.now();
     const startedAt = nowIso();
+    const inventoryBefore = this.inventoryCounts();
+    const healthBefore = Number(this.bot.health ?? 20);
 
     this.log("SUBGOAL_STARTED", {
       subgoal: subgoal.name,
-      params: subgoal.params
+      params: subgoal.params,
+      steps: this.subgoalExecutionSteps(subgoal)
     });
     this.maybeChatTaskEvent(`[task] ${this.botId} start ${this.subgoalSummary(subgoal)}`);
+    this.maybeChatTaskEvent(
+      `[steps] ${this.botId} ${this.subgoalExecutionSteps(subgoal)
+        .map((step, index) => `${index + 1}) ${step}`)
+        .join(" | ")}`,
+      true
+    );
 
     try {
       const result = await this.deps.skillEngine.execute(
@@ -691,6 +792,8 @@ export class BotController {
 
       const endedAt = nowIso();
       const durationMs = Date.now() - startedAtMs;
+      const inventoryAfter = this.inventoryCounts();
+      const healthAfter = Number(this.bot.health ?? healthBefore);
       this.deps.metrics.recordSubgoal(this.botId, subgoal.name, result.outcome, durationMs);
 
       const historyEntry: ActionHistoryEntry = {
@@ -700,6 +803,8 @@ export class BotController {
         outcome: result.outcome,
         error_code: result.outcome === "FAILURE" ? (result.errorCode as FailureCode) : null,
         error_details: result.outcome === "FAILURE" ? result.details : null,
+        inventory_delta: this.inventoryDelta(inventoryBefore, inventoryAfter),
+        health_delta: healthAfter - healthBefore,
         duration_ms: durationMs
       };
 

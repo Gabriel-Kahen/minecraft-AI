@@ -1,5 +1,6 @@
 import type { SnapshotV1 } from "../../../../contracts/snapshot";
 import type { RuntimeTaskState } from "../core/types";
+import { getMcData } from "../utils/mc-data";
 
 const RESOURCE_BLOCKS = [
   "oak_log",
@@ -85,7 +86,7 @@ const nearbyBlocksByName = (
   maxResults: number
 ): Array<{ type: string; distance: number; position: { x: number; y: number; z: number } }> => {
   const blocks: Array<{ type: string; distance: number; position: { x: number; y: number; z: number } }> = [];
-  const mcData = require("minecraft-data")(bot.version);
+  const mcData = getMcData(bot.version);
   const blockIdSet = new Set<number>();
   const requestedNames = new Set<string>();
 
@@ -135,12 +136,65 @@ const nearbyBlocksByName = (
   return blocks.sort((a, b) => a.distance - b.distance).slice(0, maxResults);
 };
 
+interface NearbyCacheEntry {
+  scannedAtMs: number;
+  position: { x: number; y: number; z: number };
+  resources: SnapshotV1["nearby_summary"]["resources"];
+  pointsOfInterest: SnapshotV1["nearby_summary"]["points_of_interest"];
+}
+
+const nearbyCache = new Map<string, NearbyCacheEntry>();
+
+export interface SnapshotBuildOptions {
+  nowMs?: number;
+  nearbyCacheMs?: number;
+  nearbyRescanDistance?: number;
+}
+
 export const buildSnapshot = (
   bot: any,
   botId: string,
-  taskState: RuntimeTaskState
+  taskState: RuntimeTaskState,
+  options?: SnapshotBuildOptions
 ): SnapshotV1 => {
   const timeOfDay = bot.time?.timeOfDay ?? 0;
+  const nowMs = options?.nowMs ?? Date.now();
+  const nearbyCacheMs = Math.max(0, options?.nearbyCacheMs ?? 2000);
+  const nearbyRescanDistance = Math.max(0, options?.nearbyRescanDistance ?? 4);
+  const nearbyRescanDistanceSq = nearbyRescanDistance * nearbyRescanDistance;
+
+  const currentPosition = {
+    x: bot.entity.position.x,
+    y: bot.entity.position.y,
+    z: bot.entity.position.z
+  };
+
+  const cachedNearby = nearbyCache.get(botId);
+  const movedSq =
+    cachedNearby === undefined
+      ? Number.POSITIVE_INFINITY
+      : (currentPosition.x - cachedNearby.position.x) ** 2 +
+        (currentPosition.y - cachedNearby.position.y) ** 2 +
+        (currentPosition.z - cachedNearby.position.z) ** 2;
+  const canReuseNearby =
+    cachedNearby !== undefined &&
+    nowMs - cachedNearby.scannedAtMs <= nearbyCacheMs &&
+    movedSq <= nearbyRescanDistanceSq;
+  const nearbyResources = canReuseNearby
+    ? cachedNearby.resources
+    : nearbyBlocksByName(bot, RESOURCE_BLOCKS, 24, 6);
+  const nearbyPointsOfInterest = canReuseNearby
+    ? cachedNearby.pointsOfInterest
+    : nearbyBlocksByName(bot, POI_BLOCKS, 24, 4);
+
+  if (!canReuseNearby) {
+    nearbyCache.set(botId, {
+      scannedAtMs: nowMs,
+      position: currentPosition,
+      resources: nearbyResources,
+      pointsOfInterest: nearbyPointsOfInterest
+    });
+  }
 
   return {
     bot_id: botId,
@@ -149,11 +203,7 @@ export const buildSnapshot = (
       day_phase: phaseFromTick(timeOfDay)
     },
     player: {
-      position: {
-        x: bot.entity.position.x,
-        y: bot.entity.position.y,
-        z: bot.entity.position.z
-      },
+      position: currentPosition,
       dimension: bot.game?.dimension ?? "overworld",
       health: bot.health ?? 20,
       hunger: bot.food ?? 20,
@@ -162,8 +212,8 @@ export const buildSnapshot = (
     inventory_summary: inventorySummary(bot),
     nearby_summary: {
       hostiles: nearbyHostiles(bot),
-      resources: nearbyBlocksByName(bot, RESOURCE_BLOCKS, 24, 6),
-      points_of_interest: nearbyBlocksByName(bot, POI_BLOCKS, 24, 4)
+      resources: nearbyResources,
+      points_of_interest: nearbyPointsOfInterest
     },
     task_context: {
       current_goal: taskState.currentGoal,

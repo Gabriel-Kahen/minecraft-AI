@@ -21,20 +21,20 @@ TypeScript implementation of a planner/executor Minecraft automation stack:
 - `contracts`: schemas and shared contracts
 - `blueprints`: generated design artifacts and design output directory
 - `infra/windows`: Paper + NSSM setup
-- `infra/pi`: systemd service + environment template
+- `infra/pi`: systemd service + YAML config template
 
 ## Quick Start (Development)
 
 1. Install Node 20 and npm (pnpm also works).
-2. Copy orchestrator env:
-   - `cp apps/orchestrator/.env.example apps/orchestrator/.env`
-3. Set required Vertex fields (`GEMINI_PROJECT_ID`, location/model).
+2. Create a local YAML config:
+   - `cp infra/pi/config.yaml.example /tmp/mc-config.yaml`
+3. Set required Vertex fields in YAML (`GEMINI_PROJECT_ID`, `GEMINI_LOCATION`, `GEMINI_MODEL`).
 4. Install dependencies from repo root:
    - `npm install`
 5. Run tests:
    - `npm test`
 6. Start orchestrator:
-   - `npm run dev`
+   - `npm run --workspace @mc/orchestrator dev -- --config /tmp/mc-config.yaml`
 
 ## Production Ops
 
@@ -47,8 +47,8 @@ TypeScript implementation of a planner/executor Minecraft automation stack:
 ### Raspberry Pi
 
 - Deploy repo to your chosen deploy root (for example `mc`).
-- Copy env template:
-  - `cp infra/pi/mc-orchestrator.env.example <system-env-file>`
+- Copy YAML config template:
+  - `sudo mkdir -p /etc/mc-orchestrator && sudo cp infra/pi/config.yaml.example /etc/mc-orchestrator/config.yaml`
 - Install service:
   - `sudo infra/pi/install-service.sh`
 

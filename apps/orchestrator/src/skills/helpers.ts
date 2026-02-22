@@ -120,14 +120,22 @@ export const gotoCoordinates = async (
     let settled = false;
     let noPathEvents = 0;
     let timeoutHandle: NodeJS.Timeout | null = null;
+    let movementWatchHandle: NodeJS.Timeout | null = null;
+    let lastMoveAt = Date.now();
+    let lastPos = ctx.bot.entity.position.clone();
 
     const cleanup = (): void => {
       ctx.bot.removeListener("goal_reached", onGoalReached);
       ctx.bot.removeListener("path_reset", onPathReset);
+      ctx.bot.removeListener("path_update", onPathUpdate);
       ctx.bot.removeListener("error", onError);
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
         timeoutHandle = null;
+      }
+      if (movementWatchHandle) {
+        clearInterval(movementWatchHandle);
+        movementWatchHandle = null;
       }
     };
 
@@ -161,6 +169,23 @@ export const gotoCoordinates = async (
         }
       }
     };
+    const onPathUpdate = (update: { status?: string } | undefined): void => {
+      if (!update) {
+        return;
+      }
+      if (update.status === "noPath" || update.status === "timeout") {
+        noPathEvents += 1;
+        if (noPathEvents >= 2) {
+          settle(
+            () =>
+              reject(
+                failure("PATHFIND_FAILED", `pathfinder update: ${update.status}`)
+              ),
+            true
+          );
+        }
+      }
+    };
     const onError = (err: unknown): void =>
       settle(
         () =>
@@ -177,8 +202,39 @@ export const gotoCoordinates = async (
       );
     }, computedTimeoutMs);
 
+    movementWatchHandle = setInterval(() => {
+      const currentPos = ctx.bot.entity.position;
+      const moved = currentPos.distanceTo(lastPos);
+      if (moved >= 0.2) {
+        lastMoveAt = Date.now();
+        lastPos = currentPos.clone();
+        return;
+      }
+
+      const pathfinder = ctx.bot.pathfinder;
+      const isMoving =
+        Boolean(pathfinder) &&
+        typeof pathfinder.isMoving === "function" &&
+        pathfinder.isMoving();
+      if (!isMoving) {
+        return;
+      }
+
+      const stalledForMs = Date.now() - lastMoveAt;
+      if (stalledForMs >= 12000) {
+        settle(
+          () =>
+            reject(
+              failure("PATHFIND_FAILED", `movement stalled for ${stalledForMs}ms`)
+            ),
+          true
+        );
+      }
+    }, 1000);
+
     ctx.bot.on("goal_reached", onGoalReached);
     ctx.bot.on("path_reset", onPathReset);
+    ctx.bot.on("path_update", onPathUpdate);
     ctx.bot.on("error", onError);
     ctx.bot.pathfinder.setGoal(goal);
   });

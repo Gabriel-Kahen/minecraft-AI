@@ -60,7 +60,7 @@ const findCandidateBlocks = (
   ctx: SkillExecutionContext,
   names: string[],
   maxDistance: number,
-  maxCount = 24
+  maxCount = 16
 ): any[] => {
   const nameSet = new Set(names.map((name) => name.toLowerCase()));
   const positions = ctx.bot.findBlocks({
@@ -117,10 +117,12 @@ export const gotoNearestSkill = async (
     candidates.push(fallback);
   }
 
-  const perCandidateTimeoutMs = Math.max(7000, Math.floor(Number(params.attempt_timeout_ms ?? 12000)));
+  const perCandidateTimeoutMs = Math.max(6000, Math.floor(Number(params.attempt_timeout_ms ?? 10000)));
+  const maxCandidates = Math.max(1, Math.floor(Number(params.max_candidates ?? 8)));
+  const cappedCandidates = candidates.slice(0, maxCandidates);
   let lastError: unknown = null;
 
-  for (const block of candidates) {
+  for (const block of cappedCandidates) {
     try {
       await gotoCoordinates(
         ctx,
@@ -140,5 +142,9 @@ export const gotoNearestSkill = async (
     return failure("RESOURCE_NOT_FOUND", `no ${blockName} within ${maxDistance} blocks`, true);
   }
 
-  return asSkillFailure(lastError, "PATHFIND_FAILED");
+  return failure(
+    "PATHFIND_FAILED",
+    `could not path to any ${blockName} candidate (tried ${cappedCandidates.length}/${candidates.length})`,
+    true
+  );
 };

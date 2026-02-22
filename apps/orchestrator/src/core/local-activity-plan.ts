@@ -35,7 +35,7 @@ export const buildLocalActivityPlan = (
       subgoals: [
         {
           name: "combat_engage",
-          params: { target_mode: "hostile", max_distance: 16, timeout_ms: 9000 },
+          params: { target_mode: "hostile", max_distance: 16, timeout_ms: 14000 },
           success_criteria: { hostiles_within: 8, equals: 0 }
         }
       ]
@@ -52,12 +52,12 @@ export const buildLocalActivityPlan = (
       subgoals: [
         {
           name: "combat_engage",
-          params: { target_mode: "animal", max_distance: 28, timeout_ms: 12000 },
+          params: { target_mode: "animal", max_distance: 28, timeout_ms: 18000 },
           success_criteria: { action_complete: true }
         },
         {
           name: "explore",
-          params: { radius: 18, return_to_base: false },
+          params: { radius: 18, return_to_base: false, max_waypoints: 3, attempt_timeout_ms: 16000 },
           success_criteria: { explored_points_min: 1 }
         }
       ]

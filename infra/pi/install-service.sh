@@ -8,16 +8,19 @@ fi
 
 ROOT_DIR="/opt/mc"
 SERVICE_FILE="${ROOT_DIR}/infra/pi/mc-orchestrator.service"
-ENV_EXAMPLE="${ROOT_DIR}/infra/pi/mc-orchestrator.env.example"
-ENV_FILE="/etc/mc-orchestrator.env"
+CONFIG_EXAMPLE="${ROOT_DIR}/infra/pi/config.yaml.example"
+CONFIG_DIR="/etc/mc-orchestrator"
+CONFIG_FILE="${CONFIG_DIR}/config.yaml"
 
 install -m 0644 "$SERVICE_FILE" /etc/systemd/system/mc-orchestrator.service
-if [[ ! -f "$ENV_FILE" ]]; then
-  install -m 0644 "$ENV_EXAMPLE" "$ENV_FILE"
+mkdir -p "$CONFIG_DIR"
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  install -m 0644 "$CONFIG_EXAMPLE" "$CONFIG_FILE"
 fi
 
 mkdir -p /var/log/mc-orchestrator /var/lib/mc-orchestrator
 chown -R pi:pi /var/log/mc-orchestrator /var/lib/mc-orchestrator
+chown -R pi:pi "$CONFIG_DIR"
 
 systemctl daemon-reload
 systemctl enable mc-orchestrator.service

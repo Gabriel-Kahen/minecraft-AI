@@ -38,7 +38,7 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-ENV_FILE="/etc/mc-orchestrator.env"
+CONFIG_FILE="/etc/mc-orchestrator/config.yaml"
 SERVICE_FILE="/etc/systemd/system/mc-orchestrator.service"
 
 DATA_DIR="/var/lib/mc-orchestrator"
@@ -48,15 +48,32 @@ SQLITE_FILE="/var/lib/mc-orchestrator/state.sqlite"
 SERVICE_USER="pi"
 SERVICE_GROUP="pi"
 
-if [[ -f "$ENV_FILE" ]]; then
-  # shellcheck disable=SC1090
-  set -a && source "$ENV_FILE" && set +a
-fi
+read_yaml_value() {
+  local key="$1"
+  local default_value="$2"
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "$default_value"
+    return
+  fi
+  local line
+  line="$(grep -E "^[[:space:]]*${key}:[[:space:]]*" "$CONFIG_FILE" | tail -n 1 || true)"
+  if [[ -z "$line" ]]; then
+    echo "$default_value"
+    return
+  fi
+  local value
+  value="$(echo "$line" | sed -E "s/^[[:space:]]*${key}:[[:space:]]*//" | sed -E 's/[[:space:]]+#.*$//' | sed -E 's/^\"(.*)\"$/\1/' | sed -E "s/^'(.*)'$/\1/")"
+  if [[ -z "$value" ]]; then
+    echo "$default_value"
+    return
+  fi
+  echo "$value"
+}
 
-DATA_DIR="${DATA_DIR:-/var/lib/mc-orchestrator}"
-BLUEPRINT_DIR="${BLUEPRINT_DIR:-${DATA_DIR}/blueprints}"
-LOG_DIR="${LOG_DIR:-/var/log/mc-orchestrator}"
-SQLITE_FILE="${SQLITE_FILE:-${DATA_DIR}/state.sqlite}"
+DATA_DIR="$(read_yaml_value DATA_DIR /var/lib/mc-orchestrator)"
+BLUEPRINT_DIR="$(read_yaml_value BLUEPRINT_DIR "${DATA_DIR}/blueprints")"
+LOG_DIR="$(read_yaml_value LOG_DIR /var/log/mc-orchestrator)"
+SQLITE_FILE="$(read_yaml_value SQLITE_FILE "${DATA_DIR}/state.sqlite")"
 
 if [[ -f "$SERVICE_FILE" ]]; then
   USER_LINE="$(grep -E '^User=' "$SERVICE_FILE" || true)"

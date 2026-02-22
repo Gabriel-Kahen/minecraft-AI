@@ -35,10 +35,25 @@ const installLogGuards = (): void => {
   };
 };
 
+const readConfigPathArg = (): string | undefined => {
+  const args = process.argv.slice(2);
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--config") {
+      return args[index + 1];
+    }
+    if (arg.startsWith("--config=")) {
+      return arg.slice("--config=".length);
+    }
+  }
+  return undefined;
+};
+
 const bootstrap = async (): Promise<void> => {
   installLogGuards();
 
-  const config = loadConfig();
+  const configPath = readConfigPathArg();
+  const config = loadConfig({ configPath });
 
   ensureDir(config.DATA_DIR);
   ensureDir(config.BLUEPRINT_DIR);

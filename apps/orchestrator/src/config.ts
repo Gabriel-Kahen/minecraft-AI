@@ -1,4 +1,28 @@
+import { existsSync, readFileSync } from "node:fs";
+import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+
+const parseBoolean = (value: unknown, defaultValue: boolean): boolean => {
+  if (value === undefined || value === null || value === "") {
+    return defaultValue;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized)) {
+      return true;
+    }
+    if (["0", "false", "no", "off"].includes(normalized)) {
+      return false;
+    }
+  }
+  return defaultValue;
+};
 
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -6,9 +30,9 @@ const envSchema = z.object({
   MC_PORT: z.coerce.number().int().min(1).max(65535).default(25565),
   MC_VERSION: z.string().default("1.20.4"),
   MC_OFFLINE_MODE: z
-    .string()
+    .unknown()
     .optional()
-    .transform((value) => value !== "false"),
+    .transform((value) => parseBoolean(value, true)),
   BOT_COUNT: z.coerce.number().int().min(1).max(5).default(4),
   BOT_USERNAME_PREFIX: z.string().default("pi-bot"),
   BOT_PASSWORD: z.string().optional().default(""),
@@ -21,9 +45,9 @@ const envSchema = z.object({
   RECONNECT_JITTER_MS: z.coerce.number().int().min(0).default(8000),
   MAX_CONCURRENT_SKILLS: z.coerce.number().int().min(1).max(5).default(4),
   ALWAYS_ACTIVE_MODE: z
-    .string()
+    .unknown()
     .optional()
-    .transform((value) => value !== "false"),
+    .transform((value) => parseBoolean(value, true)),
   ALWAYS_ACTIVE_REQUEUE_MS: z.coerce.number().int().min(500).default(2500),
   SUBGOAL_EXEC_TIMEOUT_MS: z.coerce.number().int().min(5000).default(180000),
   SUBGOAL_RETRY_LIMIT: z.coerce.number().int().min(0).max(20).default(8),
@@ -32,21 +56,21 @@ const envSchema = z.object({
   SUBGOAL_LOOP_GUARD_REPEATS: z.coerce.number().int().min(2).max(50).default(8),
   SUBGOAL_FAILURE_STREAK_WINDOW_MS: z.coerce.number().int().min(10000).default(180000),
   CHAT_STATUS_ENABLED: z
-    .string()
+    .unknown()
     .optional()
-    .transform((value) => value !== "false"),
+    .transform((value) => parseBoolean(value, true)),
   CHAT_STATUS_INTERVAL_MS: z.coerce.number().int().min(5000).default(45000),
   CHAT_TASK_EVENTS_ENABLED: z
-    .string()
+    .unknown()
     .optional()
-    .transform((value) => value !== "false"),
+    .transform((value) => parseBoolean(value, true)),
   CHAT_TASK_EVENT_MIN_MS: z.coerce.number().int().min(250).default(3500),
   CHAT_MIN_INTERVAL_MS: z.coerce.number().int().min(250).default(5000),
   CHAT_DUPLICATE_WINDOW_MS: z.coerce.number().int().min(1000).default(30000),
   CHAT_INCLUDE_STEPS: z
-    .string()
+    .unknown()
     .optional()
-    .transform((value) => value === "true"),
+    .transform((value) => parseBoolean(value, false)),
   LLM_HISTORY_LIMIT: z.coerce.number().int().min(1).max(30).default(20),
   PLANNER_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).default(6000),
   PLANNER_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
@@ -66,9 +90,9 @@ const envSchema = z.object({
   LOG_DIR: z.string().default("./data/logs"),
   METRICS_PORT: z.coerce.number().int().min(1).max(65535).default(9464),
   DEBUG_VIEWER: z
-    .string()
+    .unknown()
     .optional()
-    .transform((value) => value === "true"),
+    .transform((value) => parseBoolean(value, false)),
   VIEWER_PORT_BASE: z.coerce.number().int().min(1).max(65535).default(3007),
   MAX_CONCURRENT_EXPLORERS: z.coerce.number().int().min(1).max(5).default(2),
   LOCK_LEASE_MS: z.coerce.number().int().min(1000).default(45000),
@@ -82,4 +106,32 @@ const envSchema = z.object({
 
 export type AppConfig = z.infer<typeof envSchema>;
 
-export const loadConfig = (): AppConfig => envSchema.parse(process.env);
+interface LoadConfigOptions {
+  configPath?: string;
+}
+
+const readYamlConfig = (configPath?: string): Record<string, unknown> => {
+  if (!configPath || !existsSync(configPath)) {
+    return {};
+  }
+
+  const raw = readFileSync(configPath, "utf8");
+  if (!raw.trim()) {
+    return {};
+  }
+
+  const parsed = parseYaml(raw) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`invalid config yaml at ${configPath}: expected top-level mapping`);
+  }
+  return parsed as Record<string, unknown>;
+};
+
+export const loadConfig = (options?: LoadConfigOptions): AppConfig => {
+  const yamlConfig = readYamlConfig(options?.configPath);
+  const merged = {
+    ...yamlConfig,
+    ...process.env
+  };
+  return envSchema.parse(merged);
+};

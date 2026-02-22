@@ -62,6 +62,8 @@ export class BotController {
 
   private loopTimer: NodeJS.Timeout | null = null;
 
+  private tickInFlight = false;
+
   private connected = false;
 
   private stopped = false;
@@ -308,7 +310,9 @@ export class BotController {
     }
 
     if (this.taskState.currentSubgoal) {
-      return `active ${this.subgoalSummary(this.taskState.currentSubgoal)}`;
+      const retryCount = this.taskState.currentSubgoal.retryCount ?? 0;
+      const token = this.taskState.currentSubgoal.id.slice(0, 6);
+      return `active#${token} ${this.subgoalSummary(this.taskState.currentSubgoal)} r:${retryCount} q:${this.taskState.queue.length}`;
     }
 
     const queued = this.taskState.queue[0];
@@ -321,6 +325,50 @@ export class BotController {
     }
 
     return "idle";
+  }
+
+  private async clearResidualActions(): Promise<void> {
+    const bot = this.bot;
+    if (!bot) {
+      return;
+    }
+
+    try {
+      if (typeof bot.collectBlock?.cancelTask === "function") {
+        await Promise.race([
+          bot.collectBlock.cancelTask(),
+          sleep(1200)
+        ]);
+      }
+    } catch {
+      // best-effort cancellation
+    }
+
+    try {
+      if (typeof bot.pvp?.stop === "function") {
+        bot.pvp.stop();
+      }
+    } catch {
+      // best-effort cancellation
+    }
+
+    try {
+      bot.pathfinder?.setGoal?.(null);
+    } catch {
+      // best-effort cancellation
+    }
+
+    try {
+      bot.pathfinder?.stop?.();
+    } catch {
+      // best-effort cancellation
+    }
+
+    try {
+      bot.clearControlStates?.();
+    } catch {
+      // best-effort cancellation
+    }
   }
 
   private shortenForChat(value: string, maxLength = 80): string {
@@ -375,22 +423,33 @@ export class BotController {
 
   async start(): Promise<void> {
     this.stopped = false;
+    this.tickInFlight = false;
     this.deps.store.upsertBot(this.botId, nowIso());
     await this.connect();
 
     this.loopTimer = setInterval(() => {
-      this.tick().catch((error) => {
-        this.log("INCIDENT", {
-          category: "loop",
-          error: error instanceof Error ? error.message : String(error)
+      if (this.stopped || this.tickInFlight) {
+        return;
+      }
+
+      this.tickInFlight = true;
+      this.tick()
+        .catch((error) => {
+          this.log("INCIDENT", {
+            category: "loop",
+            error: error instanceof Error ? error.message : String(error)
+          });
+        })
+        .finally(() => {
+          this.tickInFlight = false;
         });
-      });
     }, this.deps.config.ORCH_TICK_MS);
     this.loopTimer.unref();
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.tickInFlight = false;
     this.deps.skillLimiter.forget(this.botId);
     if (this.loopTimer) {
       clearInterval(this.loopTimer);
@@ -400,6 +459,11 @@ export class BotController {
     this.reflexManager.detach();
 
     if (this.bot) {
+      try {
+        await this.clearResidualActions();
+      } catch {
+        // ignore
+      }
       try {
         this.bot.quit("orchestrator shutdown");
       } catch {
@@ -916,6 +980,7 @@ export class BotController {
       return;
     }
 
+    await this.clearResidualActions();
     this.taskState.busy = true;
     this.taskState.currentSubgoal = subgoal;
     this.currentSubgoalStartedAtMs = Date.now();
@@ -926,11 +991,14 @@ export class BotController {
     const healthBefore = Number(this.bot.health ?? 20);
 
     this.log("SUBGOAL_STARTED", {
+      subgoal_id: subgoal.id,
       subgoal: subgoal.name,
       params: subgoal.params,
       steps: this.subgoalExecutionSteps(subgoal)
     });
-    this.maybeChatTaskEvent(`[task] ${this.botId} start ${this.subgoalSummary(subgoal)}`);
+    this.maybeChatTaskEvent(
+      `[task] ${this.botId} start#${subgoal.id.slice(0, 6)} ${this.subgoalSummary(subgoal)}`
+    );
     if (this.deps.config.CHAT_INCLUDE_STEPS) {
       this.maybeChatTaskEvent(
         `[steps] ${this.botId} ${this.subgoalExecutionSteps(subgoal)
@@ -1067,22 +1135,26 @@ export class BotController {
       }
 
       this.log("SUBGOAL_FINISHED", {
+        subgoal_id: subgoal.id,
         subgoal: subgoal.name,
         result,
         queue_remaining: this.taskState.queue.length
       });
       if (result.outcome === "SUCCESS") {
         this.maybeChatTaskEvent(
-          `[task] ${this.botId} done ${this.subgoalSummary(subgoal)} in ${Math.round(durationMs / 1000)}s`
+          `[task] ${this.botId} done#${subgoal.id.slice(0, 6)} ${this.subgoalSummary(subgoal)} in ${Math.round(
+            durationMs / 1000
+          )}s`
         );
       } else {
         this.maybeChatTaskEvent(
-          `[task] ${this.botId} fail ${this.subgoalSummary(subgoal)} (${result.errorCode}) ${this.shortenForChat(
+          `[task] ${this.botId} fail#${subgoal.id.slice(0, 6)} ${this.subgoalSummary(subgoal)} (${result.errorCode}) ${this.shortenForChat(
             result.details
           )}`
         );
       }
     } finally {
+      await this.clearResidualActions();
       this.taskState.currentSubgoal = null;
       this.taskState.busy = false;
       this.currentSubgoalStartedAtMs = 0;

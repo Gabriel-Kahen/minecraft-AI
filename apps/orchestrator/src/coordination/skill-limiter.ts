@@ -10,7 +10,7 @@ export class SkillLimiter {
 
   tryEnter(botId: string): boolean {
     if (this.active.has(botId)) {
-      return true;
+      return false;
     }
 
     if (!this.waiting.includes(botId)) {

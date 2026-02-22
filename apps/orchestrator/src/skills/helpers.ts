@@ -199,6 +199,23 @@ export const selectHotbarItem = async (ctx: SkillExecutionContext, itemName: str
   return true;
 };
 
+export const equipBestToolForBlock = async (
+  ctx: SkillExecutionContext,
+  block: any,
+  requireHarvest = false
+): Promise<void> => {
+  const toolApi = ctx.bot.tool;
+  if (!toolApi || typeof toolApi.equipForBlock !== "function" || !block) {
+    return;
+  }
+
+  try {
+    await toolApi.equipForBlock(block, { requireHarvest });
+  } catch {
+    // Best-effort; the caller may still be able to dig by hand.
+  }
+};
+
 export const placeBlockAt = async (
   ctx: SkillExecutionContext,
   x: number,

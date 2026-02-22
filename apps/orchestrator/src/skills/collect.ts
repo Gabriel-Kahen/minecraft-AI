@@ -1,6 +1,14 @@
 import type { SkillResultV1 } from "../../../../contracts/skills";
 import type { SkillExecutionContext } from "./context";
-import { asSkillFailure, countItem, failure, findNearestBlock, gotoCoordinates, success } from "./helpers";
+import {
+  asSkillFailure,
+  countItem,
+  equipBestToolForBlock,
+  failure,
+  findNearestBlock,
+  gotoCoordinates,
+  success
+} from "./helpers";
 import { getMcData } from "../utils/mc-data";
 
 interface CollectTargetSpec {
@@ -114,6 +122,7 @@ const tryManualDig = async (ctx: SkillExecutionContext, block: any): Promise<"du
   }
 
   try {
+    await equipBestToolForBlock(ctx, refreshed, false);
     await ctx.bot.dig(refreshed);
     await wait(700);
     return "dug";
@@ -171,6 +180,7 @@ export const collectSkill = async (
     }
 
     try {
+      await equipBestToolForBlock(ctx, block, false);
       if (typeof ctx.bot.canDigBlock === "function" && !ctx.bot.canDigBlock(block)) {
         return failure(
           "RESOURCE_NOT_FOUND",

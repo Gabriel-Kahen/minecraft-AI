@@ -92,6 +92,8 @@ export class BotController {
 
   private currentSubgoalTimeoutHandled = false;
 
+  private forcedDisconnectReason: string | null = null;
+
   constructor(botId: string, deps: BotControllerDependencies) {
     this.botId = botId;
     this.deps = deps;
@@ -408,6 +410,7 @@ export class BotController {
         return;
       }
       this.connected = true;
+      this.forcedDisconnectReason = null;
       this.disconnectStreak = 0;
       this.log("CONNECTED", {});
       this.reflexManager.attach(bot, {
@@ -430,6 +433,7 @@ export class BotController {
       if (this.bot !== bot || this.stopped) {
         return;
       }
+      this.forcedDisconnectReason = null;
       const formatted = formatDisconnectReason(reason);
       this.log("DISCONNECTED", {
         reason: formatted
@@ -441,10 +445,12 @@ export class BotController {
       if (this.bot !== bot || this.stopped) {
         return;
       }
+      const reason = this.forcedDisconnectReason ?? "connection_end";
+      this.forcedDisconnectReason = null;
       this.log("DISCONNECTED", {
-        reason: "connection_end"
+        reason
       });
-      this.scheduleReconnect(bot, "end");
+      this.scheduleReconnect(bot, "end", reason);
     });
 
     bot.on("death", () => {
@@ -575,6 +581,7 @@ export class BotController {
     }
 
     this.currentSubgoalTimeoutHandled = true;
+    this.forcedDisconnectReason = "subgoal_timeout";
     this.log("SUBGOAL_TIMEOUT", {
       subgoal: this.taskState.currentSubgoal.name,
       elapsed_ms: elapsedMs

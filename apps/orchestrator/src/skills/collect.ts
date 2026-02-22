@@ -7,6 +7,7 @@ import {
   failure,
   findNearestBlock,
   gotoCoordinates,
+  withTimeout,
   success
 } from "./helpers";
 import { getMcData } from "../utils/mc-data";
@@ -105,6 +106,17 @@ const findNearestCollectBlock = (
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+const shouldPreferManualDig = (target: CollectTargetSpec, block: any): boolean => {
+  const name = String(block?.name ?? "");
+  if (name.endsWith("_log")) {
+    return true;
+  }
+  if (target.label === "log" || target.label === "logs" || target.label === "wood" || target.label === "tree") {
+    return true;
+  }
+  return false;
+};
+
 const tryManualDig = async (ctx: SkillExecutionContext, block: any): Promise<"dug" | "cannot_dig" | "no_block"> => {
   try {
     await gotoCoordinates(ctx, block.position.x, block.position.y, block.position.z, 3, 15000);
@@ -162,6 +174,7 @@ export const collectSkill = async (
   }
 
   const deadlineMs = Date.now() + Math.max(15000, Number(params.timeout_ms ?? 90000));
+  const perAttemptTimeoutMs = Math.max(5000, Number(params.attempt_timeout_ms ?? 15000));
   let after = current;
   let attempts = 0;
   let misses = 0;
@@ -190,7 +203,32 @@ export const collectSkill = async (
       }
 
       const beforeAttempt = after;
-      await collector([block]);
+      if (shouldPreferManualDig(target, block)) {
+        const manualResult = await tryManualDig(ctx, block);
+        if (manualResult === "cannot_dig") {
+          return failure(
+            "RESOURCE_NOT_FOUND",
+            `cannot dig ${block.name} at ${block.position?.x},${block.position?.y},${block.position?.z} (spawn-protection or permissions)`,
+            false
+          );
+        }
+        if (manualResult === "dug") {
+          attempts += 1;
+          misses = 0;
+          after = countInventoryItems(ctx, target.inventoryItems);
+          if (after <= beforeAttempt) {
+            noProgressAttempts += 1;
+          } else {
+            noProgressAttempts = 0;
+          }
+          if (noProgressAttempts >= 4) {
+            break;
+          }
+          continue;
+        }
+      }
+
+      await withTimeout(collector([block]), perAttemptTimeoutMs);
       attempts += 1;
       misses = 0;
       after = countInventoryItems(ctx, target.inventoryItems);
@@ -222,7 +260,14 @@ export const collectSkill = async (
         break;
       }
     } catch (error) {
-      const mapped = asSkillFailure(error, "RESOURCE_NOT_FOUND");
+      const mapped =
+        error instanceof Error && error.message === "timeout"
+          ? failure(
+              "RESOURCE_NOT_FOUND",
+              `collect attempt timed out after ${perAttemptTimeoutMs}ms`,
+              true
+            )
+          : asSkillFailure(error, "RESOURCE_NOT_FOUND");
       lastErrorDetail = mapped.details;
       const detailsLower = mapped.details.toLowerCase();
       if (

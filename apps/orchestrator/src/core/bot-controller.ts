@@ -104,6 +104,10 @@ export class BotController {
 
   private lastStuckTriggerAtMs = 0;
 
+  private lastActivityAtMs = Date.now();
+
+  private lastActivityPosition: { x: number; y: number; z: number } | null = null;
+
   constructor(botId: string, deps: BotControllerDependencies) {
     this.botId = botId;
     this.deps = deps;
@@ -371,6 +375,10 @@ export class BotController {
     }
   }
 
+  private markActivity(): void {
+    this.lastActivityAtMs = Date.now();
+  }
+
   private shortenForChat(value: string, maxLength = 80): string {
     if (value.length <= maxLength) {
       return value;
@@ -424,6 +432,7 @@ export class BotController {
   async start(): Promise<void> {
     this.stopped = false;
     this.tickInFlight = false;
+    this.lastActivityAtMs = Date.now();
     this.deps.store.upsertBot(this.botId, nowIso());
     await this.connect();
 
@@ -472,6 +481,7 @@ export class BotController {
       this.bot = null;
     }
 
+    this.lastActivityPosition = null;
     this.connected = false;
   }
 
@@ -503,6 +513,12 @@ export class BotController {
         return;
       }
       this.connected = true;
+      this.markActivity();
+      this.lastActivityPosition = {
+        x: bot.entity.position.x,
+        y: bot.entity.position.y,
+        z: bot.entity.position.z
+      };
       this.forcedDisconnectReason = null;
       this.disconnectStreak = 0;
       this.log("CONNECTED", {});
@@ -510,6 +526,46 @@ export class BotController {
         isBusy: () => this.taskState.busy,
         onTrigger: (trigger, details) => this.pushTrigger(trigger, details)
       });
+    });
+
+    bot.on("move", () => {
+      if (this.bot !== bot || this.stopped) {
+        return;
+      }
+      const position = bot.entity?.position;
+      if (!position) {
+        return;
+      }
+      if (!this.lastActivityPosition) {
+        this.lastActivityPosition = { x: position.x, y: position.y, z: position.z };
+        this.markActivity();
+        return;
+      }
+      const moved = Math.hypot(
+        position.x - this.lastActivityPosition.x,
+        position.y - this.lastActivityPosition.y,
+        position.z - this.lastActivityPosition.z
+      );
+      if (moved >= 0.15) {
+        this.lastActivityPosition = { x: position.x, y: position.y, z: position.z };
+        this.markActivity();
+      }
+    });
+
+    bot.on("playerCollect", () => {
+      if (this.bot !== bot || this.stopped) {
+        return;
+      }
+      this.markActivity();
+    });
+
+    bot.on("entitySwingArm", (entity: any) => {
+      if (this.bot !== bot || this.stopped) {
+        return;
+      }
+      if (entity === bot.entity) {
+        this.markActivity();
+      }
     });
 
     bot.on("error", (error: unknown) => {
@@ -565,6 +621,7 @@ export class BotController {
     this.deps.skillLimiter.forget(this.botId);
     this.disconnectStreak += 1;
     this.connected = false;
+    this.lastActivityPosition = null;
     this.reconnectPending = true;
     const interruptedSubgoal = this.taskState.currentSubgoal;
     this.taskState.busy = false;
@@ -721,6 +778,44 @@ export class BotController {
     }
   }
 
+  private maybeHandleActiveSubgoalIdle(now: number): void {
+    if (!this.taskState.busy || !this.taskState.currentSubgoal || !this.bot) {
+      return;
+    }
+    if (this.currentSubgoalStartedAtMs <= 0) {
+      return;
+    }
+
+    const subgoalElapsedMs = now - this.currentSubgoalStartedAtMs;
+    if (subgoalElapsedMs < 7000) {
+      return;
+    }
+
+    const inactiveForMs = now - this.lastActivityAtMs;
+    if (inactiveForMs < this.deps.config.SUBGOAL_IDLE_STALL_MS) {
+      return;
+    }
+
+    this.log("SUBGOAL_IDLE_STALL", {
+      subgoal: this.taskState.currentSubgoal.name,
+      inactive_ms: inactiveForMs,
+      elapsed_ms: subgoalElapsedMs
+    });
+    this.maybeChatTaskEvent(
+      `[task] ${this.botId} stalled ${this.subgoalSummary(this.taskState.currentSubgoal)} inactive ${Math.round(
+        inactiveForMs / 1000
+      )}s; recovering`
+    );
+    this.forcedDisconnectReason = "subgoal_idle_stall";
+    try {
+      this.bot.pathfinder?.setGoal(null);
+      this.bot.clearControlStates?.();
+      this.bot.quit("subgoal idle stall");
+    } catch {
+      // best effort reset
+    }
+  }
+
   private async tick(): Promise<void> {
     if (this.stopped || !this.bot || !this.connected) {
       return;
@@ -728,6 +823,7 @@ export class BotController {
 
     const now = Date.now();
     this.maybeHandleActiveSubgoalTimeout(now);
+    this.maybeHandleActiveSubgoalIdle(now);
 
     if (this.taskState.busy) {
       const hasStuckTrigger = this.taskState.pendingTriggers.includes("STUCK");
@@ -1093,6 +1189,16 @@ export class BotController {
           const retryDelayMs = Math.min(
             this.deps.config.SUBGOAL_RETRY_MAX_DELAY_MS,
             Math.max(0, withJitter(baseDelayMs))
+          );
+          this.log("SUBGOAL_RETRY_WAIT", {
+            subgoal: subgoal.name,
+            retry_count_next: retryCount + 1,
+            retry_delay_ms: retryDelayMs
+          });
+          this.maybeChatTaskEvent(
+            `[task] ${this.botId} retry#${subgoal.id.slice(0, 6)} in ${Math.round(
+              retryDelayMs / 1000
+            )}s (${result.errorCode})`
           );
           await sleep(retryDelayMs);
           const retrySubgoal: RuntimeSubgoal = {

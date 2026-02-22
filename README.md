@@ -52,6 +52,19 @@ TypeScript implementation of a planner/executor Minecraft automation stack:
 - Install service:
   - `sudo infra/pi/install-service.sh`
 
+## Full Reset (World + Orchestrator)
+
+Use this when you want a completely fresh world and fresh bot/orchestrator state.
+
+1. Reset the Paper world on Windows:
+   - `powershell -ExecutionPolicy Bypass -File infra/windows/reset-world-state.ps1 -ServerDir C:\mc-server -ServiceName MinecraftPaper`
+2. Reset orchestrator state on Pi:
+   - `sudo bash infra/pi/reset-orchestrator-state.sh`
+
+Notes:
+- The Windows reset removes the active `level-name` world folder plus `_nether` and `_the_end`.
+- The Pi reset clears orchestrator SQLite/data/blueprints/logs and restarts `mc-orchestrator.service`.
+
 ## Contracts
 
 - Snapshot schema: `contracts/snapshot.schema.json`

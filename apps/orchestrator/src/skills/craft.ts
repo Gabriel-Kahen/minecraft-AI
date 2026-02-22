@@ -1,6 +1,7 @@
 import type { SkillResultV1 } from "../../../../contracts/skills";
 import type { SkillExecutionContext } from "./context";
 import { asSkillFailure, countItem, failure, findNearestBlock, gotoCoordinates, success } from "./helpers";
+import { Vec3 } from "vec3";
 
 const placeCraftingTableIfNeeded = async (ctx: SkillExecutionContext): Promise<any | null> => {
   let table = findNearestBlock(ctx, "crafting_table", 24);
@@ -19,13 +20,63 @@ const placeCraftingTableIfNeeded = async (ctx: SkillExecutionContext): Promise<a
     return null;
   }
 
-  await ctx.bot.equip(tableItem, "hand");
-  const reference = ctx.bot.blockAt(ctx.bot.entity.position.offset(0, -1, 0));
-  if (!reference || reference.name === "air") {
+  const feet = ctx.bot.entity.position.floored();
+  const candidateTargets = [
+    feet.offset(1, 0, 0),
+    feet.offset(-1, 0, 0),
+    feet.offset(0, 0, 1),
+    feet.offset(0, 0, -1),
+    feet.offset(1, -1, 0),
+    feet.offset(-1, -1, 0),
+    feet.offset(0, -1, 1),
+    feet.offset(0, -1, -1)
+  ];
+
+  let support: any = null;
+  let face: Vec3 | null = null;
+  let targetPos: Vec3 | null = null;
+  for (const candidate of candidateTargets) {
+    const targetBlock = ctx.bot.blockAt(candidate);
+    const supportBlock = ctx.bot.blockAt(candidate.offset(0, -1, 0));
+    if (!targetBlock || targetBlock.name !== "air") {
+      continue;
+    }
+    if (!supportBlock || supportBlock.name === "air") {
+      continue;
+    }
+    support = supportBlock;
+    face = new Vec3(0, 1, 0);
+    targetPos = candidate;
+    break;
+  }
+
+  if (!support || !face || !targetPos) {
     return null;
   }
 
-  await ctx.bot.placeBlock(reference, ctx.bot.entity.position.offset(1, 0, 0).minus(reference.position));
+  try {
+    await gotoCoordinates(ctx, targetPos.x, targetPos.y, targetPos.z, 3, 15000);
+  } catch {
+    return null;
+  }
+
+  await ctx.bot.equip(tableItem, "hand");
+  try {
+    await ctx.bot.placeBlock(support, face);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (
+      message.toLowerCase().includes("blockupdate") ||
+      message.toLowerCase().includes("timeout")
+    ) {
+      throw failure(
+        "DEPENDS_ON_ITEM",
+        "crafting table placement blocked by server (spawn protection/permissions) or lag timeout",
+        false
+      );
+    }
+    throw error;
+  }
   table = findNearestBlock(ctx, "crafting_table", 12);
   return table;
 };
@@ -74,6 +125,13 @@ export const craftSkill = async (
     const craftedUnits = countItem(ctx, itemName) - before;
     return success(`crafted ${craftedUnits} ${itemName}`, { crafted: craftedUnits });
   } catch (error) {
-    return asSkillFailure(error, "DEPENDS_ON_ITEM");
+    const mapped = asSkillFailure(error, "DEPENDS_ON_ITEM");
+    if (
+      mapped.details.toLowerCase().includes("blockupdate") ||
+      mapped.details.toLowerCase().includes("placement blocked")
+    ) {
+      return failure("DEPENDS_ON_ITEM", mapped.details, false);
+    }
+    return mapped;
   }
 };

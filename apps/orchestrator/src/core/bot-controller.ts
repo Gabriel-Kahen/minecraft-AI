@@ -13,7 +13,7 @@ import { ActionHistoryBuffer } from "./history-buffer";
 import { buildLocalActivityPlan } from "./local-activity-plan";
 import type { PlannerTrigger, RuntimeSubgoal, RuntimeTaskState } from "./types";
 import { enforceSubgoalPrerequisites, type BlueprintDesigner, type PlannerService } from "../planner";
-import { nowIso } from "../utils/time";
+import { nowIso, sleep } from "../utils/time";
 import { makeId } from "../utils/id";
 import type { SQLiteStore, JsonlLogger } from "../store";
 import { ReflexManager } from "../reflex";
@@ -81,6 +81,12 @@ export class BotController {
   private lastAlwaysActiveAtMs = 0;
 
   private lastTaskEventChatAtMs = 0;
+
+  private repeatedFailureKey: string | null = null;
+
+  private repeatedFailureCount = 0;
+
+  private repeatedFailureLastAtMs = 0;
 
   constructor(botId: string, deps: BotControllerDependencies) {
     this.botId = botId;
@@ -826,9 +832,30 @@ export class BotController {
           code: result.errorCode,
           details: result.details
         };
-        const retryable = result.retryable !== false;
+        let retryable = result.retryable !== false;
         const retryCount = subgoal.retryCount ?? 0;
+        const nowMs = Date.now();
+        const failureKey = `${subgoal.name}:${result.errorCode}`;
+        if (this.repeatedFailureKey === failureKey && nowMs - this.repeatedFailureLastAtMs <= 60000) {
+          this.repeatedFailureCount += 1;
+        } else {
+          this.repeatedFailureKey = failureKey;
+          this.repeatedFailureCount = 1;
+        }
+        this.repeatedFailureLastAtMs = nowMs;
+
+        if (this.repeatedFailureCount >= 3) {
+          retryable = false;
+          this.log("SUBGOAL_LOOP_GUARD", {
+            subgoal: subgoal.name,
+            error_code: result.errorCode,
+            repeats: this.repeatedFailureCount
+          });
+        }
+
         if (retryable && retryCount < this.deps.config.SUBGOAL_RETRY_LIMIT) {
+          const retryDelayMs = Math.min(5000, 1200 * (retryCount + 1));
+          await sleep(retryDelayMs);
           const retrySubgoal: RuntimeSubgoal = {
             ...subgoal,
             id: makeId(`subgoal_${this.botId}`),
@@ -839,7 +866,8 @@ export class BotController {
           this.log("SUBGOAL_REQUEUED", {
             subgoal: subgoal.name,
             retry_count: retrySubgoal.retryCount,
-            error_code: result.errorCode
+            error_code: result.errorCode,
+            retry_delay_ms: retryDelayMs
           });
         } else {
           this.taskState.plannerCooldownUntil = Date.now() + this.deps.config.PLANNER_COOLDOWN_MS;
@@ -847,6 +875,9 @@ export class BotController {
         }
         this.deps.metrics.recordFailure(this.botId, result.errorCode);
       } else {
+        this.repeatedFailureKey = null;
+        this.repeatedFailureCount = 0;
+        this.repeatedFailureLastAtMs = 0;
         this.taskState.progressCounters[subgoal.name] =
           (this.taskState.progressCounters[subgoal.name] ?? 0) + 1;
         if (this.taskState.queue.length === 0) {

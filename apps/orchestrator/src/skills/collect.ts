@@ -1,6 +1,6 @@
 import type { SkillResultV1 } from "../../../../contracts/skills";
 import type { SkillExecutionContext } from "./context";
-import { asSkillFailure, countItem, failure, findNearestBlock, success } from "./helpers";
+import { asSkillFailure, countItem, failure, findNearestBlock, gotoCoordinates, success } from "./helpers";
 import { getMcData } from "../utils/mc-data";
 
 interface CollectTargetSpec {
@@ -95,6 +95,33 @@ const findNearestCollectBlock = (
   return best;
 };
 
+const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+const tryManualDig = async (ctx: SkillExecutionContext, block: any): Promise<"dug" | "cannot_dig" | "no_block"> => {
+  try {
+    await gotoCoordinates(ctx, block.position.x, block.position.y, block.position.z, 3, 15000);
+  } catch {
+    return "no_block";
+  }
+
+  const refreshed = ctx.bot.blockAt(block.position);
+  if (!refreshed || refreshed.name === "air") {
+    return "no_block";
+  }
+
+  if (typeof ctx.bot.canDigBlock === "function" && !ctx.bot.canDigBlock(refreshed)) {
+    return "cannot_dig";
+  }
+
+  try {
+    await ctx.bot.dig(refreshed);
+    await wait(700);
+    return "dug";
+  } catch {
+    return "no_block";
+  }
+};
+
 export const collectSkill = async (
   ctx: SkillExecutionContext,
   params: Record<string, unknown>
@@ -129,6 +156,7 @@ export const collectSkill = async (
   let after = current;
   let attempts = 0;
   let misses = 0;
+  let noProgressAttempts = 0;
 
   while (Date.now() < deadlineMs && after < desiredCount) {
     const block = findNearestCollectBlock(ctx, target.searchBlocks, maxDistance);
@@ -142,15 +170,57 @@ export const collectSkill = async (
     }
 
     try {
+      if (typeof ctx.bot.canDigBlock === "function" && !ctx.bot.canDigBlock(block)) {
+        return failure(
+          "RESOURCE_NOT_FOUND",
+          `cannot dig ${block.name} at ${block.position?.x},${block.position?.y},${block.position?.z} (spawn-protection or permissions)`,
+          false
+        );
+      }
+
+      const beforeAttempt = after;
       await collector([block]);
       attempts += 1;
       misses = 0;
       after = countInventoryItems(ctx, target.inventoryItems);
+
+      if (after <= beforeAttempt) {
+        const manualResult = await tryManualDig(ctx, block);
+        if (manualResult === "cannot_dig") {
+          return failure(
+            "RESOURCE_NOT_FOUND",
+            `cannot dig ${block.name} at ${block.position?.x},${block.position?.y},${block.position?.z} (spawn-protection or permissions)`,
+            false
+          );
+        }
+        if (manualResult === "dug") {
+          after = countInventoryItems(ctx, target.inventoryItems);
+        }
+      }
+
+      if (after <= beforeAttempt) {
+        noProgressAttempts += 1;
+      } else {
+        noProgressAttempts = 0;
+      }
+
       if (attempts >= Math.max(6, desiredCount * 3) && after <= current) {
+        break;
+      }
+      if (noProgressAttempts >= 4) {
         break;
       }
     } catch (error) {
       const mapped = asSkillFailure(error, "RESOURCE_NOT_FOUND");
+      const detailsLower = mapped.details.toLowerCase();
+      if (
+        detailsLower.includes("cannot dig") ||
+        detailsLower.includes("not diggable") ||
+        detailsLower.includes("spawn") ||
+        detailsLower.includes("permission")
+      ) {
+        return failure("RESOURCE_NOT_FOUND", mapped.details, false);
+      }
       if (!mapped.retryable) {
         return mapped;
       }
@@ -165,7 +235,7 @@ export const collectSkill = async (
   if (after < desiredCount) {
     return failure(
       "RESOURCE_NOT_FOUND",
-      `collected ${after}/${desiredCount} ${target.label} before timeout`,
+      `collected ${after}/${desiredCount} ${target.label} before timeout (attempts=${attempts}, no_progress=${noProgressAttempts})`,
       true
     );
   }

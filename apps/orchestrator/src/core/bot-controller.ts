@@ -13,7 +13,7 @@ import { ActionHistoryBuffer } from "./history-buffer";
 import { buildLocalActivityPlan } from "./local-activity-plan";
 import type { PlannerTrigger, RuntimeSubgoal, RuntimeTaskState } from "./types";
 import { enforceSubgoalPrerequisites, type BlueprintDesigner, type PlannerService } from "../planner";
-import { nowIso, sleep } from "../utils/time";
+import { nowIso, sleep, withJitter } from "../utils/time";
 import { makeId } from "../utils/id";
 import type { SQLiteStore, JsonlLogger } from "../store";
 import { ReflexManager } from "../reflex";
@@ -87,6 +87,10 @@ export class BotController {
   private repeatedFailureCount = 0;
 
   private repeatedFailureLastAtMs = 0;
+
+  private currentSubgoalStartedAtMs = 0;
+
+  private currentSubgoalTimeoutHandled = false;
 
   constructor(botId: string, deps: BotControllerDependencies) {
     this.botId = botId;
@@ -536,12 +540,67 @@ export class BotController {
     });
   }
 
+  private canRetryFailure(errorCode: FailureCode): boolean {
+    switch (errorCode) {
+      case "RESOURCE_NOT_FOUND":
+      case "PATHFIND_FAILED":
+      case "INTERRUPTED_BY_HOSTILES":
+      case "STUCK_TIMEOUT":
+      case "INVENTORY_FULL":
+        return true;
+      case "DEPENDS_ON_ITEM":
+      case "NO_TOOL_AVAILABLE":
+      case "PLACEMENT_FAILED":
+      case "COMBAT_LOST_TARGET":
+      case "BOT_DIED":
+      default:
+        return false;
+    }
+  }
+
+  private maybeHandleActiveSubgoalTimeout(now: number): void {
+    if (!this.taskState.busy || !this.taskState.currentSubgoal || !this.bot) {
+      return;
+    }
+    if (this.currentSubgoalTimeoutHandled) {
+      return;
+    }
+    if (this.currentSubgoalStartedAtMs <= 0) {
+      return;
+    }
+
+    const elapsedMs = now - this.currentSubgoalStartedAtMs;
+    if (elapsedMs < this.deps.config.SUBGOAL_EXEC_TIMEOUT_MS) {
+      return;
+    }
+
+    this.currentSubgoalTimeoutHandled = true;
+    this.log("SUBGOAL_TIMEOUT", {
+      subgoal: this.taskState.currentSubgoal.name,
+      elapsed_ms: elapsedMs
+    });
+    this.maybeChatTaskEvent(
+      `[task] ${this.botId} timeout ${this.subgoalSummary(this.taskState.currentSubgoal)} after ${Math.round(
+        elapsedMs / 1000
+      )}s; reconnecting`
+    );
+
+    try {
+      this.bot.pathfinder?.setGoal(null);
+      this.bot.clearControlStates?.();
+      this.bot.quit("subgoal timeout");
+    } catch {
+      // best effort reset
+    }
+  }
+
   private async tick(): Promise<void> {
     if (this.stopped || !this.bot || !this.connected) {
       return;
     }
 
     const now = Date.now();
+    this.maybeHandleActiveSubgoalTimeout(now);
 
     if (this.taskState.busy) {
       return;
@@ -758,6 +817,8 @@ export class BotController {
 
     this.taskState.busy = true;
     this.taskState.currentSubgoal = subgoal;
+    this.currentSubgoalStartedAtMs = Date.now();
+    this.currentSubgoalTimeoutHandled = false;
     const startedAtMs = Date.now();
     const startedAt = nowIso();
     const inventoryBefore = this.inventoryCounts();
@@ -832,7 +893,7 @@ export class BotController {
           code: result.errorCode,
           details: result.details
         };
-        let retryable = result.retryable !== false;
+        let retryable = result.retryable !== false && this.canRetryFailure(result.errorCode);
         const retryCount = subgoal.retryCount ?? 0;
         const nowMs = Date.now();
         const failureKey = `${subgoal.name}:${result.errorCode}`;
@@ -854,7 +915,11 @@ export class BotController {
         }
 
         if (retryable && retryCount < this.deps.config.SUBGOAL_RETRY_LIMIT) {
-          const retryDelayMs = Math.min(5000, 1200 * (retryCount + 1));
+          const baseDelayMs = this.deps.config.SUBGOAL_RETRY_BASE_DELAY_MS * (retryCount + 1);
+          const retryDelayMs = Math.min(
+            this.deps.config.SUBGOAL_RETRY_MAX_DELAY_MS,
+            Math.max(0, withJitter(baseDelayMs))
+          );
           await sleep(retryDelayMs);
           const retrySubgoal: RuntimeSubgoal = {
             ...subgoal,
@@ -870,7 +935,8 @@ export class BotController {
             retry_delay_ms: retryDelayMs
           });
         } else {
-          this.taskState.plannerCooldownUntil = Date.now() + this.deps.config.PLANNER_COOLDOWN_MS;
+          // For non-retryable or exhausted attempts, request immediate replan to avoid idle stalls.
+          this.taskState.plannerCooldownUntil = Date.now();
           this.taskState.pendingTriggers = ["SUBGOAL_FAILED"];
         }
         this.deps.metrics.recordFailure(this.botId, result.errorCode);
@@ -904,6 +970,8 @@ export class BotController {
     } finally {
       this.taskState.currentSubgoal = null;
       this.taskState.busy = false;
+      this.currentSubgoalStartedAtMs = 0;
+      this.currentSubgoalTimeoutHandled = false;
       this.deps.skillLimiter.leave(this.botId);
     }
   }

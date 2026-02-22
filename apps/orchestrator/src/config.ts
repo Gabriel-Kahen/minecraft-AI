@@ -25,7 +25,10 @@ const envSchema = z.object({
     .optional()
     .transform((value) => value !== "false"),
   ALWAYS_ACTIVE_REQUEUE_MS: z.coerce.number().int().min(500).default(2500),
+  SUBGOAL_EXEC_TIMEOUT_MS: z.coerce.number().int().min(5000).default(75000),
   SUBGOAL_RETRY_LIMIT: z.coerce.number().int().min(0).max(8).default(4),
+  SUBGOAL_RETRY_BASE_DELAY_MS: z.coerce.number().int().min(0).default(400),
+  SUBGOAL_RETRY_MAX_DELAY_MS: z.coerce.number().int().min(250).default(1800),
   CHAT_STATUS_ENABLED: z
     .string()
     .optional()

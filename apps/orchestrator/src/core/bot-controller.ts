@@ -100,6 +100,8 @@ export class BotController {
 
   private forcedDisconnectReason: string | null = null;
 
+  private lastStuckTriggerAtMs = 0;
+
   constructor(botId: string, deps: BotControllerDependencies) {
     this.botId = botId;
     this.deps = deps;
@@ -572,6 +574,15 @@ export class BotController {
       trigger,
       details
     });
+
+    if (trigger === "STUCK" && this.bot) {
+      try {
+        this.bot.pathfinder?.setGoal(null);
+        this.bot.clearControlStates?.();
+      } catch {
+        // best-effort stuck reset
+      }
+    }
   }
 
   private canRetryFailure(errorCode: FailureCode): boolean {
@@ -655,6 +666,33 @@ export class BotController {
     this.maybeHandleActiveSubgoalTimeout(now);
 
     if (this.taskState.busy) {
+      const hasStuckTrigger = this.taskState.pendingTriggers.includes("STUCK");
+      if (hasStuckTrigger && this.currentSubgoalStartedAtMs > 0) {
+        const elapsedMs = now - this.currentSubgoalStartedAtMs;
+        if (elapsedMs >= 25000 && now - this.lastStuckTriggerAtMs >= 12000) {
+          this.lastStuckTriggerAtMs = now;
+          const currentSubgoal = this.taskState.currentSubgoal;
+          const currentLabel = currentSubgoal ? this.subgoalSummary(currentSubgoal) : "subgoal";
+          this.log("SUBGOAL_STUCK_RECOVERY", {
+            subgoal: currentSubgoal?.name ?? "unknown",
+            elapsed_ms: elapsedMs
+          });
+          this.maybeChatTaskEvent(
+            `[task] ${this.botId} stuck ${currentLabel}; reconnecting for recovery`
+          );
+          this.forcedDisconnectReason = "stuck_recovery";
+          this.taskState.pendingTriggers = this.taskState.pendingTriggers.filter(
+            (trigger) => trigger !== "STUCK"
+          );
+          try {
+            this.bot.pathfinder?.setGoal(null);
+            this.bot.clearControlStates?.();
+            this.bot.quit("stuck recovery");
+          } catch {
+            // best effort recovery
+          }
+        }
+      }
       return;
     }
 

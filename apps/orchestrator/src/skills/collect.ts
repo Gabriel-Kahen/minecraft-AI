@@ -10,12 +10,15 @@ import {
   success
 } from "./helpers";
 import { getMcData } from "../utils/mc-data";
+import { Vec3 } from "vec3";
 
 interface CollectTargetSpec {
   searchBlocks: string[];
   inventoryItems: string[];
   label: string;
 }
+
+type CollectManualResult = "dug" | "cannot_dig" | "no_block";
 
 const dedupe = (values: string[]): string[] => [...new Set(values)];
 
@@ -94,11 +97,35 @@ const isBlockVisible = (ctx: SkillExecutionContext, block: any): boolean => {
   }
 };
 
+const positionKey = (position: any): string =>
+  `${Math.floor(Number(position?.x ?? 0))},${Math.floor(Number(position?.y ?? 0))},${Math.floor(
+    Number(position?.z ?? 0)
+  )}`;
+
+const isLikelyDroppedItemEntity = (entity: any): boolean => {
+  if (!entity?.position) {
+    return false;
+  }
+  if (entity.type === "object") {
+    return true;
+  }
+  const objectType = String(entity.objectType ?? "").toLowerCase();
+  if (objectType.includes("item")) {
+    return true;
+  }
+  const name = String(entity.name ?? "").toLowerCase();
+  if (name === "item") {
+    return true;
+  }
+  return false;
+};
+
 const findCollectCandidates = (
   ctx: SkillExecutionContext,
   blockNames: string[],
   maxDistance: number,
-  maxCount = 24
+  maxCount = 24,
+  failedCandidateCounts?: Map<string, number>
 ): any[] => {
   if (blockNames.length === 0) {
     return [];
@@ -111,43 +138,89 @@ const findCollectCandidates = (
     count: maxCount
   });
 
+  const botY = Number(ctx.bot.entity?.position?.y ?? 0);
   return positions
     .map((position: any) => ctx.bot.blockAt(position))
     .filter((block: any) => block && block.name !== "air")
     .sort(
-      (a: any, b: any) =>
-        ctx.bot.entity.position.distanceTo(a.position) - ctx.bot.entity.position.distanceTo(b.position)
+      (a: any, b: any) => {
+        const distanceA = ctx.bot.entity.position.distanceTo(a.position);
+        const distanceB = ctx.bot.entity.position.distanceTo(b.position);
+        const yPenaltyA = Math.abs(Number(a.position?.y ?? botY) - botY) * 1.2;
+        const yPenaltyB = Math.abs(Number(b.position?.y ?? botY) - botY) * 1.2;
+        const failPenaltyA = (failedCandidateCounts?.get(positionKey(a.position)) ?? 0) * 10;
+        const failPenaltyB = (failedCandidateCounts?.get(positionKey(b.position)) ?? 0) * 10;
+        return distanceA + yPenaltyA + failPenaltyA - (distanceB + yPenaltyB + failPenaltyB);
+      }
     );
 };
 
 const findNearestCollectBlock = (
   ctx: SkillExecutionContext,
   blockNames: string[],
-  maxDistance: number
+  maxDistance: number,
+  failedCandidateCounts?: Map<string, number>
 ): any | null => {
-  const candidates = findCollectCandidates(ctx, blockNames, maxDistance);
-  for (const candidate of candidates) {
+  const candidates = findCollectCandidates(ctx, blockNames, maxDistance, 24, failedCandidateCounts);
+  const lessFailed = candidates.filter(
+    (candidate) => (failedCandidateCounts?.get(positionKey(candidate.position)) ?? 0) < 3
+  );
+  const ordered = lessFailed.length > 0 ? lessFailed : candidates;
+
+  for (const candidate of ordered) {
     if (isBlockVisible(ctx, candidate)) {
       return candidate;
     }
   }
-  return candidates[0] ?? null;
+  return ordered[0] ?? null;
 };
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-const nearbyDroppedItemEntities = (ctx: SkillExecutionContext, maxDistance: number): any[] => {
+const findLineOfSightObstruction = (ctx: SkillExecutionContext, targetBlock: any): any | null => {
+  if (!targetBlock?.position || !ctx.bot?.entity?.position) {
+    return null;
+  }
+
+  const eye = ctx.bot.entity.position.offset(0, Number(ctx.bot.entity.height ?? 1.62) * 0.9, 0);
+  const targetCenter = targetBlock.position.offset(0.5, 0.5, 0.5);
+  const direction = targetCenter.minus(eye);
+  const distance = eye.distanceTo(targetCenter);
+  if (!Number.isFinite(distance) || distance < 0.5) {
+    return null;
+  }
+
+  const normal = direction.scaled(1 / distance);
+  for (let traveled = 0.6; traveled < distance - 0.35; traveled += 0.35) {
+    const sample = eye.plus(normal.scaled(traveled));
+    const samplePos = new Vec3(Math.floor(sample.x), Math.floor(sample.y), Math.floor(sample.z));
+    const block = ctx.bot.blockAt(samplePos);
+    if (!block || block.name === "air") {
+      continue;
+    }
+    if (positionKey(block.position) === positionKey(targetBlock.position)) {
+      continue;
+    }
+    return block;
+  }
+
+  return null;
+};
+
+const nearbyDroppedItemEntities = (
+  ctx: SkillExecutionContext,
+  maxDistance: number,
+  originPosition?: any
+): any[] => {
   const entities = Object.values(ctx.bot.entities ?? {}) as Array<any>;
   const drops: any[] = [];
+  const origin = originPosition ?? ctx.bot.entity.position;
 
   for (const entity of entities) {
-    if (!entity?.position) {
+    if (!isLikelyDroppedItemEntity(entity)) {
       continue;
     }
-    if (entity.type !== "object") {
-      continue;
-    }
-    const distance = ctx.bot.entity.position.distanceTo(entity.position);
+    const distance = origin.distanceTo(entity.position);
     if (!Number.isFinite(distance) || distance > maxDistance) {
       continue;
     }
@@ -155,8 +228,7 @@ const nearbyDroppedItemEntities = (ctx: SkillExecutionContext, maxDistance: numb
   }
 
   drops.sort(
-    (a, b) =>
-      ctx.bot.entity.position.distanceTo(a.position) - ctx.bot.entity.position.distanceTo(b.position)
+    (a, b) => origin.distanceTo(a.position) - origin.distanceTo(b.position)
   );
   return drops;
 };
@@ -212,28 +284,89 @@ const waitForDropCollectedOrGone = async (
     ctx.bot.on("playerCollect", onPlayerCollect);
   });
 
+const waitForInventoryGain = async (
+  ctx: SkillExecutionContext,
+  itemNames: string[],
+  beforeCount: number,
+  timeoutMs = 2200
+): Promise<number> => {
+  const startedAt = Date.now();
+  let current = countInventoryItems(ctx, itemNames);
+  while (Date.now() - startedAt < timeoutMs) {
+    if (current > beforeCount) {
+      return current;
+    }
+    await wait(120);
+    current = countInventoryItems(ctx, itemNames);
+  }
+  return current;
+};
+
+const nudgeToward = async (ctx: SkillExecutionContext, position: any, durationMs = 700): Promise<void> => {
+  try {
+    await ctx.bot.lookAt(position, true);
+  } catch {
+    // ignore look failures
+  }
+
+  try {
+    ctx.bot.setControlState("forward", true);
+    if (Number(position?.y ?? 0) > Number(ctx.bot.entity?.position?.y ?? 0) + 0.35) {
+      ctx.bot.setControlState("jump", true);
+    }
+    await wait(durationMs);
+  } finally {
+    try {
+      ctx.bot.setControlState("forward", false);
+      ctx.bot.setControlState("jump", false);
+    } catch {
+      // ignore
+    }
+  }
+};
+
 const sweepNearbyDrops = async (
   ctx: SkillExecutionContext,
   maxDistance = 9,
-  maxPasses = 6
+  maxPasses = 6,
+  expectedItems: string[] = [],
+  centerPosition?: any
 ): Promise<void> => {
+  const seenDropIds = new Set<number>();
   for (let pass = 0; pass < maxPasses; pass += 1) {
     const drops = nearbyDroppedItemEntities(ctx, maxDistance);
+    if (centerPosition) {
+      const centeredDrops = nearbyDroppedItemEntities(ctx, maxDistance, centerPosition);
+      for (const drop of centeredDrops) {
+        if (!drops.some((candidate) => candidate.id === drop.id)) {
+          drops.push(drop);
+        }
+      }
+    }
     if (drops.length === 0) {
       return;
     }
     let progressed = false;
+    const before = countInventoryItems(ctx, expectedItems);
 
-    for (const drop of drops.slice(0, 8)) {
+    for (const drop of drops.slice(0, 12)) {
+      if (seenDropIds.has(drop.id)) {
+        continue;
+      }
+      seenDropIds.add(drop.id);
       try {
-        await gotoCoordinates(
-          ctx,
-          drop.position.x,
-          drop.position.y,
-          drop.position.z,
-          1,
-          7000
-        );
+        try {
+          await gotoCoordinates(
+            ctx,
+            drop.position.x,
+            drop.position.y,
+            drop.position.z,
+            1,
+            7000
+          );
+        } catch {
+          await nudgeToward(ctx, drop.position, 850);
+        }
         const collected = await waitForDropCollectedOrGone(ctx, drop.id, 1800);
         if (collected) {
           progressed = true;
@@ -244,10 +377,72 @@ const sweepNearbyDrops = async (
       }
     }
 
+    const after = countInventoryItems(ctx, expectedItems);
+    if (after > before) {
+      progressed = true;
+    }
+
     if (!progressed) {
-      await wait(250);
+      await wait(350);
+      seenDropIds.clear();
     }
   }
+};
+
+const clearLineOfSightToBlock = async (
+  ctx: SkillExecutionContext,
+  targetBlock: any,
+  expectedItems: string[],
+  maxClearBlocks = 4
+): Promise<"visible" | "blocked"> => {
+  if (isBlockVisible(ctx, targetBlock)) {
+    return "visible";
+  }
+
+  for (let attempt = 0; attempt < maxClearBlocks; attempt += 1) {
+    const refreshedTarget = ctx.bot.blockAt(targetBlock.position);
+    if (!refreshedTarget || refreshedTarget.name === "air") {
+      return "blocked";
+    }
+    if (isBlockVisible(ctx, refreshedTarget)) {
+      return "visible";
+    }
+
+    const obstruction = findLineOfSightObstruction(ctx, refreshedTarget);
+    if (!obstruction || obstruction.name === "air") {
+      return "blocked";
+    }
+
+    try {
+      await gotoCoordinates(ctx, obstruction.position.x, obstruction.position.y, obstruction.position.z, 3, 9000);
+    } catch {
+      return "blocked";
+    }
+
+    const digTarget = ctx.bot.blockAt(obstruction.position);
+    if (!digTarget || digTarget.name === "air") {
+      continue;
+    }
+
+    if (typeof ctx.bot.canDigBlock === "function" && !ctx.bot.canDigBlock(digTarget)) {
+      return "blocked";
+    }
+
+    try {
+      await equipBestToolForBlock(ctx, digTarget, false);
+      await ctx.bot.dig(digTarget, true);
+      await wait(450);
+      await sweepNearbyDrops(ctx, 10, 3, expectedItems, digTarget.position);
+    } catch {
+      return "blocked";
+    }
+  }
+
+  const after = ctx.bot.blockAt(targetBlock.position);
+  if (after && after.name !== "air" && isBlockVisible(ctx, after)) {
+    return "visible";
+  }
+  return "blocked";
 };
 
 const shouldPreferManualDig = (target: CollectTargetSpec, block: any): boolean => {
@@ -261,7 +456,11 @@ const shouldPreferManualDig = (target: CollectTargetSpec, block: any): boolean =
   return false;
 };
 
-const tryManualDig = async (ctx: SkillExecutionContext, block: any): Promise<"dug" | "cannot_dig" | "no_block"> => {
+const tryManualDig = async (
+  ctx: SkillExecutionContext,
+  block: any,
+  expectedItems: string[]
+): Promise<CollectManualResult> => {
   try {
     await gotoCoordinates(ctx, block.position.x, block.position.y, block.position.z, 3, 15000);
   } catch {
@@ -282,9 +481,24 @@ const tryManualDig = async (ctx: SkillExecutionContext, block: any): Promise<"du
 
   try {
     await equipBestToolForBlock(ctx, refreshed, false);
-    await ctx.bot.dig(refreshed);
-    await wait(900);
-    await sweepNearbyDrops(ctx);
+    const beforeCount = countInventoryItems(ctx, expectedItems);
+    const expectedBlockName = String(refreshed.name ?? "");
+    try {
+      await ctx.bot.dig(refreshed, true);
+    } catch (error) {
+      const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      if (message.includes("blockupdate") || message.includes("timeout")) {
+        const post = ctx.bot.blockAt(refreshed.position);
+        if (post && post.name === expectedBlockName) {
+          return "no_block";
+        }
+      } else {
+        throw error;
+      }
+    }
+    await wait(1100);
+    await sweepNearbyDrops(ctx, 12, 8, expectedItems, refreshed.position);
+    await waitForInventoryGain(ctx, expectedItems, beforeCount, 2200);
     return "dug";
   } catch {
     return "no_block";
@@ -305,6 +519,7 @@ export const collectSkill = async (
   );
   const desiredCount = Math.max(1, Math.floor(Number(params.count ?? params.amount ?? params.qty ?? 1) || 1));
   const maxDistance = Math.max(8, Math.floor(Number(params.max_distance ?? 48) || 48));
+  const lineOfSightClearLimit = Math.max(0, Math.floor(Number(params.los_clear_limit ?? 4) || 4));
 
   if (!rawTarget) {
     return failure("DEPENDS_ON_ITEM", "collect requires item or block name", false);
@@ -331,9 +546,10 @@ export const collectSkill = async (
   let misses = 0;
   let noProgressAttempts = 0;
   let lastErrorDetail = "";
+  const failedCandidateCounts = new Map<string, number>();
 
   while (Date.now() < deadlineMs && after < desiredCount) {
-    let block = findNearestCollectBlock(ctx, target.searchBlocks, maxDistance);
+    let block = findNearestCollectBlock(ctx, target.searchBlocks, maxDistance, failedCandidateCounts);
     if (!block) {
       misses += 1;
       if (misses >= missLimit) {
@@ -359,20 +575,44 @@ export const collectSkill = async (
         continue;
       }
       const refreshed = ctx.bot.blockAt(block.position);
-      if (!refreshed || refreshed.name === "air" || !isBlockVisible(ctx, refreshed)) {
+      if (!refreshed || refreshed.name === "air") {
         misses += 1;
         await wait(350);
         continue;
       }
-      block = refreshed;
+      if (!isBlockVisible(ctx, refreshed)) {
+        const losResult = await clearLineOfSightToBlock(
+          ctx,
+          refreshed,
+          target.inventoryItems,
+          lineOfSightClearLimit
+        );
+        const postClear = ctx.bot.blockAt(refreshed.position);
+        if (!postClear || postClear.name === "air") {
+          misses += 1;
+          failedCandidateCounts.set(positionKey(refreshed.position), (failedCandidateCounts.get(positionKey(refreshed.position)) ?? 0) + 1);
+          await wait(350);
+          continue;
+        }
+        if (losResult !== "visible" && !isBlockVisible(ctx, postClear)) {
+          misses += 1;
+          failedCandidateCounts.set(positionKey(postClear.position), (failedCandidateCounts.get(positionKey(postClear.position)) ?? 0) + 1);
+          await wait(350);
+          continue;
+        }
+        block = postClear;
+      } else {
+        block = refreshed;
+      }
     }
 
     try {
       await equipBestToolForBlock(ctx, block, false);
 
       const beforeAttempt = after;
+      const blockPosKey = positionKey(block.position);
       if (shouldPreferManualDig(target, block)) {
-        const manualResult = await tryManualDig(ctx, block);
+        const manualResult = await tryManualDig(ctx, block, target.inventoryItems);
         if (manualResult === "cannot_dig") {
           return failure(
             "RESOURCE_NOT_FOUND",
@@ -385,14 +625,15 @@ export const collectSkill = async (
           misses = 0;
           after = countInventoryItems(ctx, target.inventoryItems);
           if (after <= beforeAttempt) {
-            await sweepNearbyDrops(ctx);
-            await wait(350);
-            after = countInventoryItems(ctx, target.inventoryItems);
+            await sweepNearbyDrops(ctx, 12, 8, target.inventoryItems, block.position);
+            after = await waitForInventoryGain(ctx, target.inventoryItems, beforeAttempt, 2200);
           }
           if (after <= beforeAttempt) {
             noProgressAttempts += 1;
+            failedCandidateCounts.set(blockPosKey, (failedCandidateCounts.get(blockPosKey) ?? 0) + 1);
           } else {
             noProgressAttempts = 0;
+            failedCandidateCounts.delete(blockPosKey);
           }
           if (noProgressAttempts >= noProgressLimit) {
             break;
@@ -402,14 +643,14 @@ export const collectSkill = async (
       }
 
       await withTimeout(collector([block]), perAttemptTimeoutMs);
-      await sweepNearbyDrops(ctx);
+      await sweepNearbyDrops(ctx, 12, 8, target.inventoryItems, block.position);
       await wait(300);
       attempts += 1;
       misses = 0;
       after = countInventoryItems(ctx, target.inventoryItems);
 
       if (after <= beforeAttempt) {
-        const manualResult = await tryManualDig(ctx, block);
+        const manualResult = await tryManualDig(ctx, block, target.inventoryItems);
         if (manualResult === "cannot_dig") {
           return failure(
             "RESOURCE_NOT_FOUND",
@@ -418,16 +659,17 @@ export const collectSkill = async (
           );
         }
         if (manualResult === "dug") {
-          await sweepNearbyDrops(ctx);
-          await wait(300);
-          after = countInventoryItems(ctx, target.inventoryItems);
+          await sweepNearbyDrops(ctx, 12, 8, target.inventoryItems, block.position);
+          after = await waitForInventoryGain(ctx, target.inventoryItems, beforeAttempt, 2200);
         }
       }
 
       if (after <= beforeAttempt) {
         noProgressAttempts += 1;
+        failedCandidateCounts.set(blockPosKey, (failedCandidateCounts.get(blockPosKey) ?? 0) + 1);
       } else {
         noProgressAttempts = 0;
+        failedCandidateCounts.delete(blockPosKey);
       }
 
       if (attempts >= maxAttempts && after <= current) {
@@ -456,7 +698,7 @@ export const collectSkill = async (
         return failure("RESOURCE_NOT_FOUND", mapped.details, false);
       }
 
-      const manualResult = await tryManualDig(ctx, block);
+      const manualResult = await tryManualDig(ctx, block, target.inventoryItems);
       if (manualResult === "cannot_dig") {
         return failure(
           "RESOURCE_NOT_FOUND",
@@ -465,16 +707,18 @@ export const collectSkill = async (
         );
       }
       if (manualResult === "dug") {
-        await sweepNearbyDrops(ctx);
+        await sweepNearbyDrops(ctx, 12, 8, target.inventoryItems, block.position);
         await wait(300);
         attempts += 1;
         misses = 0;
         const beforeManualCount = after;
-        after = countInventoryItems(ctx, target.inventoryItems);
+        after = await waitForInventoryGain(ctx, target.inventoryItems, beforeManualCount, 2200);
         if (after <= beforeManualCount) {
           noProgressAttempts += 1;
+          failedCandidateCounts.set(positionKey(block.position), (failedCandidateCounts.get(positionKey(block.position)) ?? 0) + 1);
         } else {
           noProgressAttempts = 0;
+          failedCandidateCounts.delete(positionKey(block.position));
         }
         if (noProgressAttempts >= noProgressLimit) {
           break;

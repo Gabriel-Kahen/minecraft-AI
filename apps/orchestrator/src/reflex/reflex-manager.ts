@@ -149,7 +149,6 @@ export class ReflexManager {
         if (this.stuckCounter >= 20) {
           this.stuckCounter = 0;
           context.onTrigger("STUCK", { reason: "movement_threshold" });
-          this.runImmediateReflex(bot);
         }
       } else {
         this.stuckCounter = 0;

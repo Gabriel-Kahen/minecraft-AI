@@ -144,6 +144,8 @@ export class BotController {
 
   private currentSubgoalTimeoutHandled = false;
 
+  private currentSubgoalHadDeath = false;
+
   private forcedDisconnectReason: string | null = null;
 
   private lastStuckTriggerAtMs = 0;
@@ -915,12 +917,14 @@ export class BotController {
   }
 
   private pushTrigger(trigger: PlannerTrigger, details: Record<string, unknown>): void {
-    if (!this.taskState.pendingTriggers.includes(trigger)) {
-      this.taskState.pendingTriggers.push(trigger);
-    }
-
     if (trigger === "DEATH") {
+      this.currentSubgoalHadDeath = this.taskState.busy && Boolean(this.taskState.currentSubgoal);
       this.taskState.queue = [];
+      this.taskState.currentGoal = null;
+      this.speculativePlan = null;
+      this.taskState.pendingTriggers = ["DEATH"];
+    } else if (!this.taskState.pendingTriggers.includes(trigger)) {
+      this.taskState.pendingTriggers.push(trigger);
     }
 
     this.log("INTERRUPT", {
@@ -1463,6 +1467,7 @@ export class BotController {
     this.speculativePlan = null;
     const startedAtMs = Date.now();
     const startedAt = nowIso();
+    const triggersAtCall = [...this.taskState.pendingTriggers];
     const request: PlannerRequestV1 = {
       bot_id: this.botId,
       snapshot,
@@ -1472,7 +1477,7 @@ export class BotController {
 
     try {
       this.log("PLANNER_CALLED", {
-        triggers: this.taskState.pendingTriggers,
+        triggers: triggersAtCall,
         queue_size: this.taskState.queue.length
       });
 
@@ -1508,7 +1513,21 @@ export class BotController {
         materializedSubgoals,
         this.deps.config.MC_VERSION
       );
-      const plannedQueue = guarded.subgoals.map((subgoal) => this.runtimeSubgoal(subgoal));
+      let plannedGoal = outcome.response.next_goal;
+      let plannedQueue = guarded.subgoals.map((subgoal) => this.runtimeSubgoal(subgoal));
+
+      if (triggersAtCall.includes("DEATH") && outcome.status !== "SUCCESS") {
+        const localPlan = buildLocalActivityPlan(snapshot, this.deps.config.MC_VERSION);
+        if (localPlan.subgoals.length > 0) {
+          plannedGoal = localPlan.reason;
+          plannedQueue = localPlan.subgoals.map((subgoal) => this.runtimeSubgoal(subgoal));
+          this.log("DEATH_RECONSIDER_OVERRIDE", {
+            planner_status: outcome.status,
+            reason: localPlan.reason,
+            subgoals: localPlan.subgoals.map((subgoal) => subgoal.name)
+          });
+        }
+      }
 
       if (guarded.notes.length > 0) {
         this.log("PLANNER_GUARD_APPLIED", {
@@ -1521,14 +1540,14 @@ export class BotController {
       if (outcome.status !== "SUCCESS") {
         this.log("PLANNER_FALLBACK", {
           status: outcome.status,
-          next_goal: outcome.response.next_goal
+          next_goal: plannedGoal
         });
       }
 
       if (plannedQueue.length === 0) {
         this.log("PLANNER_EMPTY_FALLBACK", {
           status: outcome.status,
-          next_goal: outcome.response.next_goal
+          next_goal: plannedGoal
         });
         plannedQueue.push(
           this.runtimeSubgoal({
@@ -1544,18 +1563,18 @@ export class BotController {
         this.speculativePlan = {
           preparedAtMs: Date.now(),
           forSubgoalId: "__any__",
-          nextGoal: outcome.response.next_goal,
+          nextGoal: plannedGoal,
           subgoals: plannedQueue,
           plannerStatus: outcome.status
         };
         this.taskState.pendingTriggers = [];
         this.log("PLANNER_BUFFERED_WHILE_ACTIVE", {
           status: outcome.status,
-          next_goal: outcome.response.next_goal,
+          next_goal: plannedGoal,
           queue_size: plannedQueue.length
         });
       } else {
-        this.taskState.currentGoal = outcome.response.next_goal;
+        this.taskState.currentGoal = plannedGoal;
         this.taskState.queue = plannedQueue;
         this.taskState.pendingTriggers = [];
         this.maybeChatTaskEvent(
@@ -1623,6 +1642,7 @@ export class BotController {
     }
     this.taskState.busy = true;
     this.taskState.currentSubgoal = subgoal;
+    this.currentSubgoalHadDeath = false;
     this.speculativeAttemptForSubgoalId = null;
     this.currentSubgoalStartedAtMs = Date.now();
     this.currentSubgoalTimeoutHandled = false;
@@ -1650,7 +1670,7 @@ export class BotController {
     }
 
     try {
-      const result = await this.deps.skillEngine.execute(
+      const rawResult = await this.deps.skillEngine.execute(
         {
           botId: this.botId,
           bot: this.bot,
@@ -1668,6 +1688,15 @@ export class BotController {
         },
         subgoal
       );
+
+      const result: SkillResultV1 = this.currentSubgoalHadDeath
+        ? {
+            outcome: "FAILURE",
+            errorCode: "BOT_DIED",
+            details: "bot died during subgoal execution; forcing replan",
+            retryable: false
+          }
+        : rawResult;
 
       const endedAt = nowIso();
       const durationMs = Date.now() - startedAtMs;
@@ -1820,6 +1849,7 @@ export class BotController {
       }
       this.taskState.currentSubgoal = null;
       this.taskState.busy = false;
+      this.currentSubgoalHadDeath = false;
       this.currentSubgoalStartedAtMs = 0;
       this.currentSubgoalTimeoutHandled = false;
       this.deps.skillLimiter.leave(this.botId);

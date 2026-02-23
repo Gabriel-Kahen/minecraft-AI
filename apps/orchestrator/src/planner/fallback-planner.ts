@@ -17,6 +17,9 @@ export const buildFallbackPlan = (
 ): PlannerResponseV1 => {
   const lowHealth = snapshot.player.health <= 8;
   const hostiles = snapshot.nearby_summary.hostiles;
+  const hasNearbyChest = snapshot.nearby_summary.points_of_interest.some(
+    (poi) => (poi.type === "chest" || poi.type === "base_chest") && poi.distance <= 20
+  );
   const inventoryLoad =
     snapshot.inventory_summary.blocks +
     Object.values(snapshot.inventory_summary.key_items).reduce((sum, count) => sum + count, 0);
@@ -27,11 +30,6 @@ export const buildFallbackPlan = (
       risk_flags: [reason, "LOW_HEALTH"],
       subgoals: [
         {
-          name: "goto",
-          params: { x: base.x, y: base.y, z: base.z, range: base.radius },
-          success_criteria: { within_range: base.radius }
-        },
-        {
           name: "combat_guard",
           params: { radius: 12, duration_ms: 6000 },
           success_criteria: { no_hostiles_within: 12 }
@@ -40,16 +38,11 @@ export const buildFallbackPlan = (
     };
   }
 
-  if (inventoryLoad >= 120) {
+  if (inventoryLoad >= 120 && hasNearbyChest) {
     return {
       next_goal: "deposit_inventory",
       risk_flags: [reason, "INVENTORY_PRESSURE"],
       subgoals: [
-        {
-          name: "goto",
-          params: { x: base.x, y: base.y, z: base.z, range: base.radius },
-          success_criteria: { within_range: base.radius }
-        },
         {
           name: "deposit",
           params: { strategy: "all_non_essential" },

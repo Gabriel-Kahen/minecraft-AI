@@ -63,6 +63,9 @@ const formatDisconnectReason = (reason: unknown): string => {
   return String(reason);
 };
 
+const NON_BUSY_IDLE_RECOVERY_MS = 600;
+const ACTIVE_IDLE_RECOVERY_MS = 2200;
+
 export interface BotControllerDependencies {
   config: AppConfig;
   planner: PlannerService;
@@ -830,6 +833,7 @@ export class BotController {
       this.taskState.busy = false;
       this.speculativePlan = null;
       this.speculativeAttemptForSubgoalId = null;
+      this.pushTrigger("DEATH", { reason: "bot_death_event" });
     });
   }
 
@@ -1025,7 +1029,8 @@ export class BotController {
 
     const subgoalElapsedMs = now - this.currentSubgoalStartedAtMs;
     const noProgressMs = now - this.lastProgressAtMs;
-    if (noProgressMs < this.deps.config.SUBGOAL_IDLE_STALL_MS) {
+    const idleThresholdMs = Math.min(this.deps.config.SUBGOAL_IDLE_STALL_MS, ACTIVE_IDLE_RECOVERY_MS);
+    if (noProgressMs < idleThresholdMs) {
       return;
     }
 
@@ -1066,7 +1071,8 @@ export class BotController {
     }
 
     const inactiveForMs = now - this.lastActivityAtMs;
-    if (inactiveForMs < this.deps.config.SUBGOAL_IDLE_STALL_MS) {
+    const inactiveThresholdMs = Math.min(this.deps.config.SUBGOAL_IDLE_STALL_MS, NON_BUSY_IDLE_RECOVERY_MS);
+    if (inactiveForMs < inactiveThresholdMs) {
       return;
     }
 
@@ -1076,16 +1082,7 @@ export class BotController {
       });
       this.enqueueAlwaysActiveSubgoal(now);
       if (this.taskState.queue.length === 0) {
-        this.taskState.queue.unshift(
-          this.runtimeSubgoal({
-            name: "explore",
-            params: { radius: 16, return_to_base: false },
-            success_criteria: { explored_points_min: 1 }
-          })
-        );
-        this.log("IDLE_EMERGENCY_SUBGOAL_ENQUEUED", {
-          subgoal: "explore"
-        });
+        this.enqueueEmergencyExplore("idle_no_work");
       }
       this.markActivity();
       return;
@@ -1113,6 +1110,20 @@ export class BotController {
       });
       this.markActivity();
     }
+  }
+
+  private enqueueEmergencyExplore(reason: string): void {
+    this.taskState.queue.unshift(
+      this.runtimeSubgoal({
+        name: "explore",
+        params: { radius: 16, return_to_base: false },
+        success_criteria: { explored_points_min: 1 }
+      })
+    );
+    this.log("IDLE_EMERGENCY_SUBGOAL_ENQUEUED", {
+      subgoal: "explore",
+      reason
+    });
   }
 
   private async tick(): Promise<void> {
@@ -1189,6 +1200,10 @@ export class BotController {
     if (this.taskState.queue.length === 0) {
       this.enqueueAlwaysActiveSubgoal(now);
       if (this.taskState.queue.length > 0) {
+        await this.executeReadySubgoals();
+      } else {
+        // Never remain empty/idle when connected: inject a deterministic local action.
+        this.enqueueEmergencyExplore("tick_empty_queue");
         await this.executeReadySubgoals();
       }
     }

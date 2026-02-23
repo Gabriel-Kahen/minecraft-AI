@@ -29,16 +29,6 @@ const FOOD_ANIMAL_NAMES = new Set([
   "rabbit"
 ]);
 
-const PATHFIND_MAX_ATTEMPTS = 3;
-const PATHFIND_MAX_TIMEOUT_MS = 20000;
-const PATHFIND_STALL_CHECK_INTERVAL_MS = 400;
-const PATHFIND_STALL_FAIL_MS = 4200;
-const PATHFIND_INACTIVE_FAIL_MS = 2200;
-const PATHFIND_NUDGE_MS = 280;
-const PATHFIND_RETRY_JITTER_BASE_MS = 140;
-const PATHFIND_RETRY_JITTER_SPAN_MS = 120;
-const PATHFIND_NO_PATH_EVENT_LIMIT = 5;
-
 export const success = (details: string, metrics?: Record<string, number>): SkillSuccess => ({
   outcome: "SUCCESS",
   details,
@@ -123,239 +113,131 @@ export const gotoCoordinates = async (
   }
 
   const pathfinderModule = getPathfinderModule();
-  let lastFailure: SkillFailure | null = null;
+  const goal = new pathfinderModule.goals.GoalNear(Math.floor(x), Math.floor(y), Math.floor(z), range);
+  const distance = ctx.bot.entity.position.distanceTo(target);
+  const computedTimeoutMs = Math.min(90000, Math.max(timeoutMs, 8000 + Math.round(distance * 1200)));
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let noPathEvents = 0;
+    let timeoutHandle: NodeJS.Timeout | null = null;
+    let movementWatchHandle: NodeJS.Timeout | null = null;
+    let lastMoveAt = Date.now();
+    let lastPos = ctx.bot.entity.position.clone();
 
-  const nudgeTowardTarget = async (): Promise<void> => {
-    try {
-      await ctx.bot.lookAt(target, true);
-    } catch {
-      // best-effort
-    }
-
-    try {
-      ctx.bot.setControlState("forward", true);
-      if (target.y > ctx.bot.entity.position.y + 0.35) {
-        ctx.bot.setControlState("jump", true);
+    const cleanup = (): void => {
+      ctx.bot.removeListener("goal_reached", onGoalReached);
+      ctx.bot.removeListener("path_reset", onPathReset);
+      ctx.bot.removeListener("path_update", onPathUpdate);
+      ctx.bot.removeListener("error", onError);
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+        timeoutHandle = null;
       }
-      await new Promise((resolve) => setTimeout(resolve, PATHFIND_NUDGE_MS));
-    } finally {
-      try {
-        ctx.bot.clearControlStates?.();
-      } catch {
-        // best-effort
+      if (movementWatchHandle) {
+        clearInterval(movementWatchHandle);
+        movementWatchHandle = null;
       }
-    }
-  };
+    };
 
-  const runAttempt = async (attempt: number): Promise<void> => {
-    const attemptRange = range + Math.min(2, attempt - 1);
-    const goal = new pathfinderModule.goals.GoalNear(
-      Math.floor(x),
-      Math.floor(y),
-      Math.floor(z),
-      attemptRange
-    );
-    const distance = ctx.bot.entity.position.distanceTo(target);
-    const computedTimeoutMs = Math.min(
-      PATHFIND_MAX_TIMEOUT_MS,
-      Math.max(timeoutMs, 2200 + Math.round(distance * 280) + (attempt - 1) * 1000)
-    );
+    const settle = (fn: () => void, stopGoal = false): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      if (stopGoal) {
+        try {
+          ctx.bot.pathfinder?.setGoal(null);
+        } catch {
+          // ignore best-effort path cancel
+        }
+      }
+      fn();
+    };
 
-    await new Promise<void>((resolve, reject) => {
-      let settled = false;
-      let noPathEvents = 0;
-      let sawPathActivity = false;
-      let timeoutHandle: NodeJS.Timeout | null = null;
-      let movementWatchHandle: NodeJS.Timeout | null = null;
-      const attemptStartedAt = Date.now();
-      let lastMoveAt = Date.now();
-      let lastPos = ctx.bot.entity.position.clone();
+    const onGoalReached = (reachedGoal: unknown): void => {
+      if (reachedGoal && reachedGoal !== goal) {
+        return;
+      }
+      settle(resolve);
+    };
+    const onPathReset = (reason: string): void => {
+      if (reason === "noPath") {
+        noPathEvents += 1;
+        if (noPathEvents >= 3) {
+          settle(() => reject(failure("PATHFIND_FAILED", "pathfinder reported no path")), true);
+        }
+      }
+    };
+    const onPathUpdate = (update: { status?: string } | undefined): void => {
+      if (!update) {
+        return;
+      }
+      if (update.status === "noPath" || update.status === "timeout") {
+        noPathEvents += 1;
+        if (noPathEvents >= 2) {
+          settle(
+            () =>
+              reject(
+                failure("PATHFIND_FAILED", `pathfinder update: ${update.status}`)
+              ),
+            true
+          );
+        }
+      }
+    };
+    const onError = (err: unknown): void =>
+      settle(
+        () =>
+          reject(
+            failure("PATHFIND_FAILED", err instanceof Error ? err.message : "pathfinding error")
+          ),
+        true
+      );
 
-      const cleanup = (): void => {
-        ctx.bot.removeListener("goal_reached", onGoalReached);
-        ctx.bot.removeListener("path_reset", onPathReset);
-        ctx.bot.removeListener("path_update", onPathUpdate);
-        ctx.bot.removeListener("error", onError);
-        if (timeoutHandle) {
-          clearTimeout(timeoutHandle);
-          timeoutHandle = null;
-        }
-        if (movementWatchHandle) {
-          clearInterval(movementWatchHandle);
-          movementWatchHandle = null;
-        }
-      };
+    timeoutHandle = setTimeout(() => {
+      settle(
+        () => reject(failure("PATHFIND_FAILED", `path timeout after ${computedTimeoutMs}ms`)),
+        true
+      );
+    }, computedTimeoutMs);
 
-      const settle = (fn: () => void, stopGoal = false): void => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        cleanup();
-        if (stopGoal) {
-          try {
-            ctx.bot.pathfinder?.setGoal(null);
-          } catch {
-            // ignore best-effort path cancel
-          }
-        }
-        fn();
-      };
+    movementWatchHandle = setInterval(() => {
+      const currentPos = ctx.bot.entity.position;
+      const moved = currentPos.distanceTo(lastPos);
+      if (moved >= 0.2) {
+        lastMoveAt = Date.now();
+        lastPos = currentPos.clone();
+        return;
+      }
 
-      const onGoalReached = (reachedGoal: unknown): void => {
-        if (reachedGoal && reachedGoal !== goal) {
-          return;
-        }
-        settle(resolve);
-      };
+      const pathfinder = ctx.bot.pathfinder;
+      const isMoving =
+        Boolean(pathfinder) &&
+        typeof pathfinder.isMoving === "function" &&
+        pathfinder.isMoving();
+      if (!isMoving) {
+        return;
+      }
 
-      const onPathReset = (reason: string): void => {
-        sawPathActivity = true;
-        if (reason === "noPath") {
-          noPathEvents += 1;
-        }
-      };
-
-      const onPathUpdate = (update: { status?: string } | undefined): void => {
-        if (!update) {
-          return;
-        }
-        sawPathActivity = true;
-        if (update.status === "noPath" || update.status === "timeout") {
-          noPathEvents += 1;
-          return;
-        }
-        if (update.status === "success" || update.status === "partial") {
-          noPathEvents = 0;
-        }
-      };
-
-      const onError = (err: unknown): void =>
+      const stalledForMs = Date.now() - lastMoveAt;
+      if (stalledForMs >= 12000) {
         settle(
           () =>
             reject(
-              failure("PATHFIND_FAILED", err instanceof Error ? err.message : "pathfinding error")
+              failure("PATHFIND_FAILED", `movement stalled for ${stalledForMs}ms`)
             ),
           true
         );
-
-      timeoutHandle = setTimeout(() => {
-        const distanceNow = ctx.bot.entity.position.distanceTo(target);
-        if (distanceNow <= attemptRange + 0.4) {
-          settle(resolve, true);
-          return;
-        }
-        settle(
-          () => reject(failure("PATHFIND_FAILED", `path timeout after ${computedTimeoutMs}ms`)),
-          true
-        );
-      }, computedTimeoutMs);
-
-      movementWatchHandle = setInterval(() => {
-        const currentPos = ctx.bot.entity.position;
-        const moved = currentPos.distanceTo(lastPos);
-        const distanceNow = currentPos.distanceTo(target);
-        if (distanceNow <= attemptRange + 0.3) {
-          settle(resolve, true);
-          return;
-        }
-
-        if (moved >= 0.2) {
-          lastMoveAt = Date.now();
-          lastPos = currentPos.clone();
-          noPathEvents = 0;
-          return;
-        }
-
-        const pathfinder = ctx.bot.pathfinder;
-        const isMoving =
-          Boolean(pathfinder) &&
-          typeof pathfinder.isMoving === "function" &&
-          pathfinder.isMoving();
-
-        const stalledForMs = Date.now() - lastMoveAt;
-        const sinceStartMs = Date.now() - attemptStartedAt;
-        if (noPathEvents >= PATHFIND_NO_PATH_EVENT_LIMIT && !isMoving && stalledForMs >= 1500) {
-          settle(() => reject(failure("PATHFIND_FAILED", "pathfinder reported no stable path")), true);
-          return;
-        }
-
-        if (!isMoving && !sawPathActivity && sinceStartMs >= PATHFIND_INACTIVE_FAIL_MS) {
-          settle(
-            () =>
-              reject(
-                failure(
-                  "PATHFIND_FAILED",
-                  `pathfinder inactive for ${sinceStartMs}ms (no movement/path updates)`
-                )
-              ),
-            true
-          );
-          return;
-        }
-
-        if (!isMoving && stalledForMs >= PATHFIND_STALL_FAIL_MS) {
-          settle(
-            () =>
-              reject(
-                failure(
-                  "PATHFIND_FAILED",
-                  `pathfinder stopped moving for ${stalledForMs}ms`
-                )
-              ),
-            true
-          );
-          return;
-        }
-
-        if (!isMoving) {
-          return;
-        }
-
-        if (stalledForMs >= PATHFIND_STALL_FAIL_MS) {
-          settle(
-            () =>
-              reject(
-                failure("PATHFIND_FAILED", `movement stalled for ${stalledForMs}ms`)
-              ),
-            true
-          );
-        }
-      }, PATHFIND_STALL_CHECK_INTERVAL_MS);
-
-      ctx.bot.on("goal_reached", onGoalReached);
-      ctx.bot.on("path_reset", onPathReset);
-      ctx.bot.on("path_update", onPathUpdate);
-      ctx.bot.on("error", onError);
-      ctx.bot.pathfinder.setGoal(goal);
-    });
-  };
-
-  for (let attempt = 1; attempt <= PATHFIND_MAX_ATTEMPTS; attempt += 1) {
-    try {
-      await runAttempt(attempt);
-      return;
-    } catch (error) {
-      lastFailure = asSkillFailure(error, "PATHFIND_FAILED");
-      if (attempt >= PATHFIND_MAX_ATTEMPTS) {
-        break;
       }
-      try {
-        ctx.bot.pathfinder?.setGoal(null);
-      } catch {
-        // ignore best-effort path reset
-      }
-      await nudgeTowardTarget();
-      await new Promise((resolve) =>
-        setTimeout(resolve, PATHFIND_RETRY_JITTER_BASE_MS + Math.floor(Math.random() * PATHFIND_RETRY_JITTER_SPAN_MS))
-      );
-    }
-  }
+    }, 1000);
 
-  throw (
-    lastFailure ??
-    failure("PATHFIND_FAILED", `unable to reach ${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`)
-  );
+    ctx.bot.on("goal_reached", onGoalReached);
+    ctx.bot.on("path_reset", onPathReset);
+    ctx.bot.on("path_update", onPathUpdate);
+    ctx.bot.on("error", onError);
+    ctx.bot.pathfinder.setGoal(goal);
+  });
 };
 
 export const findNearestBlock = (ctx: SkillExecutionContext, blockName: string, maxDistance = 48): any => {

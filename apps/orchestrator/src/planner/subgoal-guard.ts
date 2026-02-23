@@ -444,7 +444,7 @@ const planAcquireItem = (
   subgoals.push({
     name: "collect",
     params: {
-      block: sourceBlock,
+      item: itemName,
       count: shortage
     },
     success_criteria: { item_count_gte: desiredCount }

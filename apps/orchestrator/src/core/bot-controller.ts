@@ -154,6 +154,14 @@ export class BotController {
 
   private lastActivityPosition: { x: number; y: number; z: number } | null = null;
 
+  private lastProgressAtMs = Date.now();
+
+  private lastProgressProbeAtMs = 0;
+
+  private lastProgressPosition: { x: number; y: number; z: number } | null = null;
+
+  private lastProgressInventoryTotal = 0;
+
   constructor(botId: string, deps: BotControllerDependencies) {
     this.botId = botId;
     this.deps = deps;
@@ -431,6 +439,72 @@ export class BotController {
     this.lastActivityAtMs = Date.now();
   }
 
+  private inventoryTotalCount(): number {
+    if (!this.bot?.inventory?.items) {
+      return 0;
+    }
+    const items: Array<{ count: number }> = this.bot.inventory.items();
+    let total = 0;
+    for (const item of items) {
+      total += Number(item.count ?? 0);
+    }
+    return total;
+  }
+
+  private markProgress(): void {
+    const now = Date.now();
+    this.lastProgressAtMs = now;
+    this.lastProgressProbeAtMs = now;
+    this.lastProgressInventoryTotal = this.inventoryTotalCount();
+    const position = this.bot?.entity?.position;
+    if (position) {
+      this.lastProgressPosition = {
+        x: position.x,
+        y: position.y,
+        z: position.z
+      };
+    }
+    this.markActivity();
+  }
+
+  private probeProgress(now: number): void {
+    if (!this.bot) {
+      return;
+    }
+    if (now - this.lastProgressProbeAtMs < 700) {
+      return;
+    }
+    this.lastProgressProbeAtMs = now;
+
+    const position = this.bot.entity?.position;
+    if (position) {
+      if (!this.lastProgressPosition) {
+        this.lastProgressPosition = {
+          x: position.x,
+          y: position.y,
+          z: position.z
+        };
+      } else {
+        const moved = Math.hypot(
+          position.x - this.lastProgressPosition.x,
+          position.y - this.lastProgressPosition.y,
+          position.z - this.lastProgressPosition.z
+        );
+        if (moved >= 0.15) {
+          this.markProgress();
+          return;
+        }
+      }
+    }
+
+    const inventoryTotal = this.inventoryTotalCount();
+    if (inventoryTotal !== this.lastProgressInventoryTotal) {
+      this.lastProgressInventoryTotal = inventoryTotal;
+      this.lastProgressAtMs = now;
+      this.markActivity();
+    }
+  }
+
   private shortenForChat(value: string, maxLength = 80): string {
     if (value.length <= maxLength) {
       return value;
@@ -485,6 +559,10 @@ export class BotController {
     this.stopped = false;
     this.tickInFlight = false;
     this.lastActivityAtMs = Date.now();
+    this.lastProgressAtMs = this.lastActivityAtMs;
+    this.lastProgressProbeAtMs = 0;
+    this.lastProgressPosition = null;
+    this.lastProgressInventoryTotal = 0;
     this.deps.store.upsertBot(this.botId, nowIso());
     await this.connect();
 
@@ -578,8 +656,13 @@ export class BotController {
         return;
       }
       this.connected = true;
-      this.markActivity();
+      this.markProgress();
       this.lastActivityPosition = {
+        x: bot.entity.position.x,
+        y: bot.entity.position.y,
+        z: bot.entity.position.z
+      };
+      this.lastProgressPosition = {
         x: bot.entity.position.x,
         y: bot.entity.position.y,
         z: bot.entity.position.z
@@ -613,7 +696,7 @@ export class BotController {
       );
       if (moved >= 0.15) {
         this.lastActivityPosition = { x: position.x, y: position.y, z: position.z };
-        this.markActivity();
+        this.markProgress();
       }
     });
 
@@ -621,7 +704,7 @@ export class BotController {
       if (this.bot !== bot || this.stopped) {
         return;
       }
-      this.markActivity();
+      this.markProgress();
     });
 
     bot.on("entitySwingArm", (entity: any) => {
@@ -637,7 +720,7 @@ export class BotController {
       if (this.bot !== bot || this.stopped) {
         return;
       }
-      this.markActivity();
+      this.markProgress();
     });
 
     bot.on("diggingAborted", () => {
@@ -651,14 +734,18 @@ export class BotController {
       if (this.bot !== bot || this.stopped) {
         return;
       }
-      this.markActivity();
+      if (!this.taskState.busy) {
+        this.markActivity();
+      }
     });
 
     bot.on("windowClose", () => {
       if (this.bot !== bot || this.stopped) {
         return;
       }
-      this.markActivity();
+      if (!this.taskState.busy) {
+        this.markActivity();
+      }
     });
 
     bot.on("entityAttack", (victim: any, attacker: any, weapon: any) => {
@@ -756,6 +843,7 @@ export class BotController {
     this.disconnectStreak += 1;
     this.connected = false;
     this.lastActivityPosition = null;
+    this.lastProgressPosition = null;
     this.reconnectPending = true;
     const interruptedSubgoal = this.taskState.currentSubgoal;
     this.taskState.busy = false;
@@ -929,10 +1017,11 @@ export class BotController {
     if (this.currentSubgoalStartedAtMs <= 0) {
       return;
     }
+    this.probeProgress(now);
 
     const subgoalElapsedMs = now - this.currentSubgoalStartedAtMs;
-    const inactiveForMs = now - this.lastActivityAtMs;
-    if (inactiveForMs < this.deps.config.SUBGOAL_IDLE_STALL_MS) {
+    const noProgressMs = now - this.lastProgressAtMs;
+    if (noProgressMs < this.deps.config.SUBGOAL_IDLE_STALL_MS) {
       return;
     }
 
@@ -943,25 +1032,18 @@ export class BotController {
         (typeof pathfinder.isMining === "function" && pathfinder.isMining()) ||
         (typeof pathfinder.isBuilding === "function" && pathfinder.isBuilding()));
     const hasOpenWindow = Boolean(this.bot.currentWindow);
-    const windowGraceMs = 2500;
-    const pathfinderGraceMs = Math.max(3500, this.deps.config.SUBGOAL_IDLE_STALL_MS + 1500);
-    if (
-      (hasOpenWindow && inactiveForMs < windowGraceMs) ||
-      (pathfinderActive && inactiveForMs < pathfinderGraceMs)
-    ) {
-      return;
-    }
 
     this.log("SUBGOAL_IDLE_STALL", {
       subgoal: this.taskState.currentSubgoal.name,
-      inactive_ms: inactiveForMs,
+      no_progress_ms: noProgressMs,
+      inactive_ms: now - this.lastActivityAtMs,
       elapsed_ms: subgoalElapsedMs,
       pathfinder_active: pathfinderActive,
       has_open_window: hasOpenWindow
     });
     this.maybeChatTaskEvent(
-      `[task] ${this.botId} stalled ${this.subgoalSummary(this.taskState.currentSubgoal)} inactive ${Math.round(
-        inactiveForMs / 1000
+      `[task] ${this.botId} stalled ${this.subgoalSummary(this.taskState.currentSubgoal)} no-progress ${Math.round(
+        noProgressMs / 1000
       )}s; recovering`
     );
     this.forcedDisconnectReason = "subgoal_idle_stall";
@@ -1508,13 +1590,22 @@ export class BotController {
       return false;
     }
 
-    await this.clearResidualActions();
+    try {
+      await this.clearResidualActions();
+    } catch (error) {
+      this.log("INCIDENT", {
+        category: "clear_residual_before_subgoal",
+        error: error instanceof Error ? error.message : String(error)
+      });
+      this.deps.skillLimiter.leave(this.botId);
+      return false;
+    }
     this.taskState.busy = true;
     this.taskState.currentSubgoal = subgoal;
     this.speculativeAttemptForSubgoalId = null;
     this.currentSubgoalStartedAtMs = Date.now();
     this.currentSubgoalTimeoutHandled = false;
-    this.markActivity();
+    this.markProgress();
     const startedAtMs = Date.now();
     const startedAt = nowIso();
     const inventoryBefore = this.inventoryCounts();
@@ -1698,7 +1789,14 @@ export class BotController {
         );
       }
     } finally {
-      await this.clearResidualActions();
+      try {
+        await this.clearResidualActions();
+      } catch (error) {
+        this.log("INCIDENT", {
+          category: "clear_residual_after_subgoal",
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
       this.taskState.currentSubgoal = null;
       this.taskState.busy = false;
       this.currentSubgoalStartedAtMs = 0;

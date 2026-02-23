@@ -22,29 +22,48 @@ type CollectManualResult = "dug" | "cannot_dig" | "no_block";
 
 const dedupe = (values: string[]): string[] => [...new Set(values)];
 
+const blockDropsItem = (mcData: any, blockName: string, itemName: string): boolean => {
+  const block = mcData.blocksByName[blockName];
+  const item = mcData.itemsByName[itemName];
+  if (!block || !item || !Array.isArray(block.drops)) {
+    return false;
+  }
+  return block.drops.includes(item.id);
+};
+
 const resolveCollectTarget = (ctx: SkillExecutionContext, rawTarget: string): CollectTargetSpec => {
   const target = rawTarget.trim().toLowerCase();
   const mcData = getMcData(ctx.bot.version);
   const searchBlocks: string[] = [];
   const inventoryItems: string[] = [];
 
-  const addBlock = (blockName: string): void => {
+  const addSearchBlock = (blockName: string): void => {
     if (!mcData.blocksByName[blockName]) {
       return;
     }
     searchBlocks.push(blockName);
-    if (mcData.itemsByName[blockName]) {
-      inventoryItems.push(blockName);
-    }
+  };
 
-    const drops = mcData.blocksByName[blockName].drops;
+  const addInventoryItem = (itemName: string): void => {
+    if (!mcData.itemsByName[itemName]) {
+      return;
+    }
+    inventoryItems.push(itemName);
+  };
+
+  const addDroppedItemsForBlock = (blockName: string): void => {
+    const block = mcData.blocksByName[blockName];
+    if (!block) {
+      return;
+    }
+    const drops = block.drops;
     if (!Array.isArray(drops)) {
       return;
     }
     for (const dropId of drops) {
       const dropName = mcData.items?.[dropId]?.name;
       if (dropName) {
-        inventoryItems.push(dropName);
+        addInventoryItem(dropName);
       }
     }
   };
@@ -52,25 +71,49 @@ const resolveCollectTarget = (ctx: SkillExecutionContext, rawTarget: string): Co
   if (target === "log" || target === "logs" || target === "wood" || target === "tree") {
     for (const blockName of Object.keys(mcData.blocksByName)) {
       if (blockName.endsWith("_log")) {
-        addBlock(blockName);
+        addSearchBlock(blockName);
+        addInventoryItem(blockName);
       }
     }
-  } else {
-    addBlock(target);
+    return {
+      searchBlocks: dedupe(searchBlocks),
+      inventoryItems: dedupe(inventoryItems.length > 0 ? inventoryItems : [target]),
+      label: target
+    };
   }
 
-  const item = mcData.itemsByName[target];
-  if (item) {
-    inventoryItems.push(target);
+  const targetItem = mcData.itemsByName[target];
+  const targetBlock = mcData.blocksByName[target];
+
+  if (targetBlock) {
+    addSearchBlock(target);
+    addDroppedItemsForBlock(target);
+    if (
+      targetItem &&
+      (!Array.isArray(targetBlock.drops) ||
+        targetBlock.drops.length === 0 ||
+        blockDropsItem(mcData, target, target))
+    ) {
+      addInventoryItem(target);
+    }
+  }
+
+  if (targetItem) {
+    addInventoryItem(target);
     for (const blockName of Object.keys(mcData.blocksByName)) {
       const block = mcData.blocksByName[blockName];
       if (!Array.isArray(block.drops)) {
         continue;
       }
-      if (block.drops.includes(item.id)) {
-        addBlock(blockName);
+      if (block.drops.includes(targetItem.id)) {
+        addSearchBlock(blockName);
       }
     }
+  }
+
+  if (!targetBlock && !targetItem) {
+    addSearchBlock(target);
+    addInventoryItem(target);
   }
 
   return {
@@ -525,7 +568,9 @@ export const collectSkill = async (
       params.type ??
       ""
   );
-  const desiredCount = Math.max(1, Math.floor(Number(params.count ?? params.amount ?? params.qty ?? 1) || 1));
+  const requestedCount = Math.max(1, Math.floor(Number(params.count ?? params.amount ?? params.qty ?? 1) || 1));
+  const countMode = String(params.count_mode ?? "").trim().toLowerCase();
+  const targetTotalRaw = Number(params.target_total ?? params.total_count);
   const maxDistance = Math.max(8, Math.floor(Number(params.max_distance ?? 48) || 48));
   const lineOfSightClearLimit = Math.max(0, Math.floor(Number(params.los_clear_limit ?? 4) || 4));
 
@@ -535,8 +580,14 @@ export const collectSkill = async (
 
   const target = resolveCollectTarget(ctx, rawTarget);
   const current = countInventoryItems(ctx, target.inventoryItems);
-  if (current >= desiredCount) {
-    return success(`already has ${current}/${desiredCount} ${target.label}`);
+  const desiredTotal =
+    Number.isFinite(targetTotalRaw) && targetTotalRaw > 0
+      ? Math.floor(targetTotalRaw)
+      : countMode === "total" || countMode === "absolute"
+        ? requestedCount
+        : current + requestedCount;
+  if (current >= desiredTotal) {
+    return success(`already has ${current}/${desiredTotal} ${target.label}`, { gathered: 0 });
   }
 
   const collector = ctx.bot.collectBlock?.collect;
@@ -548,7 +599,8 @@ export const collectSkill = async (
   const perAttemptTimeoutMs = Math.max(2500, Number(params.attempt_timeout_ms ?? 5000));
   const missLimit = Math.max(3, Math.floor(Number(params.miss_limit ?? 5) || 5));
   const noProgressLimit = Math.max(3, Math.floor(Number(params.no_progress_limit ?? 5) || 5));
-  const maxAttempts = Math.max(8, desiredCount * 4);
+  const neededDelta = Math.max(1, desiredTotal - current);
+  const maxAttempts = Math.max(8, neededDelta * 4);
   let after = current;
   let attempts = 0;
   let misses = 0;
@@ -556,7 +608,7 @@ export const collectSkill = async (
   let lastErrorDetail = "";
   const failedCandidateCounts = new Map<string, number>();
 
-  while (Date.now() < deadlineMs && after < desiredCount) {
+  while (Date.now() < deadlineMs && after < desiredTotal) {
     let block = findNearestCollectBlock(ctx, target.searchBlocks, maxDistance, failedCandidateCounts);
     if (!block) {
       misses += 1;
@@ -749,12 +801,14 @@ export const collectSkill = async (
     }
   }
 
-  if (after < desiredCount) {
+  if (after < desiredTotal) {
+    const gathered = Math.max(0, after - current);
     return failure(
       "RESOURCE_NOT_FOUND",
-      `collected ${after}/${desiredCount} ${target.label} before timeout (attempts=${attempts}, no_progress=${noProgressAttempts}, last_error=${lastErrorDetail || "none"})`,
+      `collected +${gathered}/+${neededDelta} ${target.label} before timeout (inventory ${after}/${desiredTotal}; attempts=${attempts}, no_progress=${noProgressAttempts}, last_error=${lastErrorDetail || "none"})`,
       true
     );
   }
-  return success(`collected ${target.label} to ${after}`, { gathered: after - current });
+  const gathered = Math.max(0, after - current);
+  return success(`collected +${gathered} ${target.label} (inventory ${after}/${desiredTotal})`, { gathered });
 };

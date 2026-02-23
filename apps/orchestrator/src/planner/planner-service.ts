@@ -170,7 +170,6 @@ const buildPrompt = (request: PlannerRequestV1, options: PromptOptions): string 
     "- If an action needs prerequisites, include prerequisite subgoals first.",
     "- Prefer 2-4 coherent subgoals that continue one mission to completion.",
     "Use short deterministic subgoals (max 4), keep params concrete and executable.",
-    "For any construction intent, use build_blueprint. Do not reference stock templates or hardcoded blueprint files.",
     "Planning context summary:",
     `- inventory: ${inventorySummary}`,
     `- nearby: ${nearbySummary || "none"}`,

@@ -161,6 +161,10 @@ export const normalizePlannerSubgoals = (
       case "goto":
         mapped = normalizeGoto(subgoal);
         break;
+      case "build_blueprint":
+        mapped = null;
+        notes.push(`temporarily_disabled_subgoal_${index}_build_blueprint`);
+        break;
       default:
         mapped = subgoal;
     }

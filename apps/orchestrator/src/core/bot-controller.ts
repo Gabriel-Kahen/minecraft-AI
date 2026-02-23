@@ -401,7 +401,7 @@ export class BotController {
       if (typeof bot.collectBlock?.cancelTask === "function") {
         await Promise.race([
           bot.collectBlock.cancelTask(),
-          sleep(120)
+          sleep(40)
         ]);
       }
     } catch {
@@ -1174,11 +1174,12 @@ export class BotController {
       if (!freshSnapshot) {
         return;
       }
-      await this.requestPlan(freshSnapshot);
-      if (!this.taskState.busy && this.taskState.queue.length > 0) {
-        await this.executeReadySubgoals();
-        return;
-      }
+      void this.requestPlan(freshSnapshot).catch((error) => {
+        this.log("INCIDENT", {
+          category: "planner_async",
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
     }
 
     if (this.taskState.queue.length === 0) {
@@ -1189,7 +1190,7 @@ export class BotController {
     }
   }
 
-  private async executeReadySubgoals(maxRuns = 2): Promise<void> {
+  private async executeReadySubgoals(maxRuns = 6): Promise<void> {
     for (let run = 0; run < maxRuns; run += 1) {
       if (this.stopped || !this.bot || !this.connected || this.taskState.busy || this.taskState.queue.length === 0) {
         return;
@@ -1361,7 +1362,11 @@ export class BotController {
       this.speculativePlan = null;
       return false;
     }
-    if (completedSubgoalId && this.speculativePlan.forSubgoalId !== completedSubgoalId) {
+    if (
+      completedSubgoalId &&
+      this.speculativePlan.forSubgoalId !== "__any__" &&
+      this.speculativePlan.forSubgoalId !== completedSubgoalId
+    ) {
       return false;
     }
     if (this.taskState.queue.length > 0 || this.taskState.busy) {
@@ -1388,9 +1393,6 @@ export class BotController {
 
   private enqueueAlwaysActiveSubgoal(nowMs: number): void {
     if (!this.deps.config.ALWAYS_ACTIVE_MODE || !this.bot) {
-      return;
-    }
-    if (this.plannerInFlight) {
       return;
     }
     if (this.taskState.busy || this.taskState.queue.length > 0) {
@@ -1491,7 +1493,6 @@ export class BotController {
       });
 
       this.deps.metrics.recordLlmCall(this.botId, outcome.status);
-      this.taskState.currentGoal = outcome.response.next_goal;
       if (outcome.notes && outcome.notes.length > 0) {
         this.log("PLANNER_NORMALIZED", {
           notes: outcome.notes
@@ -1507,16 +1508,7 @@ export class BotController {
         materializedSubgoals,
         this.deps.config.MC_VERSION
       );
-      this.taskState.queue = guarded.subgoals.map((subgoal) => this.runtimeSubgoal(subgoal));
-      this.taskState.pendingTriggers = [];
-      this.maybeChatTaskEvent(
-        `[plan] ${this.botId} ${this.shortenForChat(
-          this.taskState.currentGoal ?? "goal"
-        )} -> ${this.taskState.queue
-          .slice(0, 3)
-          .map((subgoal) => this.subgoalSummary(subgoal))
-          .join(" ; ")}`
-      );
+      const plannedQueue = guarded.subgoals.map((subgoal) => this.runtimeSubgoal(subgoal));
 
       if (guarded.notes.length > 0) {
         this.log("PLANNER_GUARD_APPLIED", {
@@ -1533,18 +1525,47 @@ export class BotController {
         });
       }
 
-      if (this.taskState.queue.length === 0) {
+      if (plannedQueue.length === 0) {
         this.log("PLANNER_EMPTY_FALLBACK", {
           status: outcome.status,
           next_goal: outcome.response.next_goal
         });
-        this.taskState.queue = [
+        plannedQueue.push(
           this.runtimeSubgoal({
             name: "explore",
             params: { radius: 20, return_to_base: true },
             success_criteria: { explored_points_min: 1 }
           })
-        ];
+        );
+      }
+
+      // Never clobber active/queued local work; buffer planner output for immediate handoff.
+      if (this.taskState.busy || this.taskState.queue.length > 0) {
+        this.speculativePlan = {
+          preparedAtMs: Date.now(),
+          forSubgoalId: "__any__",
+          nextGoal: outcome.response.next_goal,
+          subgoals: plannedQueue,
+          plannerStatus: outcome.status
+        };
+        this.taskState.pendingTriggers = [];
+        this.log("PLANNER_BUFFERED_WHILE_ACTIVE", {
+          status: outcome.status,
+          next_goal: outcome.response.next_goal,
+          queue_size: plannedQueue.length
+        });
+      } else {
+        this.taskState.currentGoal = outcome.response.next_goal;
+        this.taskState.queue = plannedQueue;
+        this.taskState.pendingTriggers = [];
+        this.maybeChatTaskEvent(
+          `[plan] ${this.botId} ${this.shortenForChat(
+            this.taskState.currentGoal ?? "goal"
+          )} -> ${this.taskState.queue
+            .slice(0, 3)
+            .map((subgoal) => this.subgoalSummary(subgoal))
+            .join(" ; ")}`
+        );
       }
     } catch (error) {
       this.taskState.plannerCooldownUntil = Date.now() + this.deps.config.PLANNER_COOLDOWN_MS;

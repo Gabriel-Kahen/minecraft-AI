@@ -33,7 +33,7 @@ const envSchema = z.object({
     .unknown()
     .optional()
     .transform((value) => parseBoolean(value, true)),
-  BOT_COUNT: z.coerce.number().int().min(1).max(5).default(4),
+  BOT_COUNT: z.coerce.number().int().min(1).max(5).default(3),
   BOT_USERNAME_PREFIX: z.string().default("pi-bot"),
   BOT_PASSWORD: z.string().optional().default(""),
   ORCH_TICK_MS: z.coerce.number().int().min(50).default(50),

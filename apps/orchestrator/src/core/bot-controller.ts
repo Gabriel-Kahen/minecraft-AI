@@ -406,7 +406,7 @@ export class BotController {
       if (typeof bot.collectBlock?.cancelTask === "function") {
         await Promise.race([
           bot.collectBlock.cancelTask(),
-          sleep(40)
+          sleep(15)
         ]);
       }
     } catch {
@@ -1175,6 +1175,7 @@ export class BotController {
     }
 
     if (this.taskState.queue.length > 0) {
+      this.maybeStartSpeculativePlan(now);
       await this.executeReadySubgoals();
       return;
     }
@@ -1209,7 +1210,7 @@ export class BotController {
     }
   }
 
-  private async executeReadySubgoals(maxRuns = 6): Promise<void> {
+  private async executeReadySubgoals(maxRuns = 12): Promise<void> {
     for (let run = 0; run < maxRuns; run += 1) {
       if (this.stopped || !this.bot || !this.connected || this.taskState.busy || this.taskState.queue.length === 0) {
         return;
@@ -1228,45 +1229,25 @@ export class BotController {
     if (this.plannerInFlight || this.speculativePlanInFlight) {
       return false;
     }
-    if (!this.taskState.busy || !this.taskState.currentSubgoal || this.taskState.queue.length > 0) {
+    if (!this.taskState.busy && this.taskState.queue.length === 0) {
       return false;
     }
-    if (
-      this.currentSubgoalStartedAtMs > 0 &&
-      nowMs - this.currentSubgoalStartedAtMs < 1200
-    ) {
+    if (this.taskState.pendingTriggers.includes("DEATH")) {
       return false;
     }
-    if (this.taskState.pendingTriggers.length > 0) {
-      return false;
-    }
-    if (nowMs - this.lastSpeculativePlanAtMs < this.deps.config.PLAN_PREFETCH_MIN_INTERVAL_MS) {
+    // Keep only a tiny debounce to avoid planner call storms while staying aggressive.
+    if (nowMs - this.lastSpeculativePlanAtMs < 150) {
       return false;
     }
 
-    const currentSubgoalId = this.taskState.currentSubgoal.id;
-    if (this.speculativeAttemptForSubgoalId === currentSubgoalId) {
+    const anchorId = this.taskState.currentSubgoal?.id ?? this.taskState.queue[0]?.id ?? "__any__";
+    if (this.speculativeAttemptForSubgoalId === anchorId) {
       return false;
     }
     if (
       this.speculativePlan &&
-      this.speculativePlan.forSubgoalId === currentSubgoalId &&
+      (this.speculativePlan.forSubgoalId === anchorId || this.speculativePlan.forSubgoalId === "__any__") &&
       nowMs - this.speculativePlan.preparedAtMs <= this.deps.config.PLAN_PREFETCH_MAX_AGE_MS
-    ) {
-      return false;
-    }
-
-    const botCalls = this.deps.planner.callsInLastHour(this.botId);
-    if (
-      botCalls >=
-      Math.max(0, this.deps.config.LLM_PER_BOT_HOURLY_CAP - this.deps.config.PLAN_PREFETCH_RESERVE_CALLS)
-    ) {
-      return false;
-    }
-    const globalCalls = this.deps.planner.callsInLastHour();
-    if (
-      globalCalls >=
-      Math.max(0, this.deps.config.LLM_GLOBAL_HOURLY_CAP - this.deps.config.PLAN_PREFETCH_RESERVE_CALLS)
     ) {
       return false;
     }
@@ -1279,8 +1260,8 @@ export class BotController {
     }
 
     const snapshot = this.refreshSnapshot(nowMs, false);
-    const currentSubgoal = this.taskState.currentSubgoal;
-    if (!snapshot || !currentSubgoal) {
+    const planningAnchor = this.taskState.currentSubgoal ?? this.taskState.queue[0] ?? null;
+    if (!snapshot || !planningAnchor) {
       return;
     }
 
@@ -1291,13 +1272,14 @@ export class BotController {
       available_subgoals: [...SUBGOAL_NAMES]
     };
 
-    const forSubgoalId = currentSubgoal.id;
+    const forSubgoalId = planningAnchor.id;
     this.speculativePlanInFlight = true;
     this.speculativeAttemptForSubgoalId = forSubgoalId;
     this.lastSpeculativePlanAtMs = nowMs;
     this.log("PLANNER_PREFETCH_CALLED", {
       for_subgoal_id: forSubgoalId,
-      subgoal: currentSubgoal.name,
+      subgoal: planningAnchor.name,
+      mode: this.taskState.busy ? "active" : "queued",
       queue_size: this.taskState.queue.length
     });
 
@@ -1322,10 +1304,9 @@ export class BotController {
         this.deps.metrics.recordLlmCall(this.botId, outcome.status);
 
         const stillRelevant =
-          this.taskState.currentSubgoal?.id === forSubgoalId &&
-          this.taskState.busy &&
           !this.stopped &&
-          this.connected;
+          this.connected &&
+          !this.taskState.pendingTriggers.includes("DEATH");
         if (!stillRelevant) {
           return;
         }
@@ -1345,7 +1326,7 @@ export class BotController {
         }
         this.speculativePlan = {
           preparedAtMs: Date.now(),
-          forSubgoalId,
+          forSubgoalId: "__any__",
           nextGoal: outcome.response.next_goal,
           subgoals: guarded.subgoals.map((subgoal) => this.runtimeSubgoal(subgoal)),
           plannerStatus: outcome.status
@@ -1368,12 +1349,6 @@ export class BotController {
 
   private consumeSpeculativePlanIfFresh(completedSubgoalId?: string): boolean {
     if (!this.speculativePlan) {
-      return false;
-    }
-    if (
-      !completedSubgoalId &&
-      !this.taskState.pendingTriggers.includes("SUBGOAL_COMPLETED")
-    ) {
       return false;
     }
     const ageMs = Date.now() - this.speculativePlan.preparedAtMs;
@@ -1477,9 +1452,38 @@ export class BotController {
     }
   }
 
+  private dispatchImmediatePlan(reason: string): void {
+    if (this.stopped || !this.connected || !this.bot) {
+      return;
+    }
+    if (this.plannerInFlight) {
+      this.log("PLANNER_DISPATCH_SKIPPED", {
+        reason,
+        skip: "planner_in_flight",
+        queue_size: this.taskState.queue.length
+      });
+      return;
+    }
+    this.taskState.plannerCooldownUntil = Date.now();
+    const snapshot = this.refreshSnapshot(Date.now(), true);
+    if (!snapshot) {
+      return;
+    }
+    this.log("PLANNER_DISPATCHED_IMMEDIATE", {
+      reason,
+      pending_triggers: [...this.taskState.pendingTriggers],
+      queue_size: this.taskState.queue.length
+    });
+    void this.requestPlan(snapshot).catch((error) => {
+      this.log("INCIDENT", {
+        category: "planner_dispatch_immediate",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+  }
+
   private async requestPlan(snapshot: ReturnType<typeof buildSnapshot>): Promise<void> {
     this.plannerInFlight = true;
-    this.speculativePlan = null;
     const startedAtMs = Date.now();
     const startedAt = nowIso();
     const triggersAtCall = [...this.taskState.pendingTriggers];
@@ -1600,6 +1604,10 @@ export class BotController {
             .map((subgoal) => this.subgoalSummary(subgoal))
             .join(" ; ")}`
         );
+        // Start executing immediately instead of waiting for the next tick.
+        if (!this.taskState.busy && this.taskState.queue.length > 0) {
+          void this.executeReadySubgoals();
+        }
       }
     } catch (error) {
       this.taskState.plannerCooldownUntil = Date.now() + this.deps.config.PLANNER_COOLDOWN_MS;
@@ -1818,6 +1826,7 @@ export class BotController {
           }
           this.taskState.plannerCooldownUntil = Date.now();
           this.taskState.pendingTriggers = ["SUBGOAL_FAILED"];
+          this.dispatchImmediatePlan("subgoal_failed_hard");
         }
         this.deps.metrics.recordFailure(this.botId, result.errorCode);
       } else {
@@ -1830,6 +1839,7 @@ export class BotController {
           const consumedPrefetch = this.consumeSpeculativePlanIfFresh(subgoal.id);
           if (!consumedPrefetch) {
             this.taskState.pendingTriggers = ["SUBGOAL_COMPLETED"];
+            this.dispatchImmediatePlan("subgoal_completed_queue_empty");
           }
         }
       }

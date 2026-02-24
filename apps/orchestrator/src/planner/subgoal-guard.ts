@@ -11,6 +11,13 @@ export interface AutonomousPlan {
   subgoals: PlannerSubgoal[];
 }
 
+export interface ProgressionHint {
+  recommendedGoal: string;
+  recommendedSubgoals: Array<{ name: PlannerSubgoal["name"]; params: Record<string, unknown> }>;
+  capabilityGaps: string[];
+  actionableResources: string[];
+}
+
 interface RecipePlan {
   recipe: any;
   ingredients: Map<string, number>;
@@ -524,6 +531,95 @@ const ensureCraftPrerequisites = (
   return prerequisites;
 };
 
+const parseDesiredCountFromSubgoal = (subgoal: PlannerSubgoal): number =>
+  positiveInt(subgoal.params.count ?? subgoal.params.amount ?? subgoal.params.qty, 1);
+
+const makeExploreFallback = (target: string): PlannerSubgoal => ({
+  name: "explore",
+  params: {
+    radius: 28,
+    return_to_base: false,
+    resource_hint: target || undefined,
+    max_waypoints: 3,
+    attempt_timeout_ms: 10000
+  },
+  success_criteria: { explored_points_min: 1 }
+});
+
+const dedupeAdjacentSubgoals = (
+  subgoals: PlannerSubgoal[],
+  notes: string[]
+): PlannerSubgoal[] => {
+  const output: PlannerSubgoal[] = [];
+  let dropped = 0;
+
+  for (const subgoal of subgoals) {
+    const prev = output[output.length - 1];
+    if (!prev) {
+      output.push(subgoal);
+      continue;
+    }
+    const same =
+      prev.name === subgoal.name &&
+      JSON.stringify(prev.params) === JSON.stringify(subgoal.params) &&
+      JSON.stringify(prev.success_criteria) === JSON.stringify(subgoal.success_criteria);
+    if (same) {
+      dropped += 1;
+      continue;
+    }
+    output.push(subgoal);
+  }
+
+  if (dropped > 0) {
+    notes.push(`deduped_adjacent_subgoals_${dropped}`);
+  }
+
+  return output;
+};
+
+const buildCapabilityGaps = (ctx: PlanningContext): string[] => {
+  const gaps: string[] = [];
+  const seen = new Set<string>();
+  const resources = [...ctx.snapshot.nearby_summary.resources].sort((a, b) => a.distance - b.distance);
+
+  for (const resource of resources) {
+    const requiredTool = requiredToolForBlock(ctx, resource.type);
+    if (!requiredTool || hasItem(ctx, requiredTool, 1)) {
+      continue;
+    }
+    const key = `${resource.type}->${requiredTool}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    gaps.push(key);
+    if (gaps.length >= 8) {
+      break;
+    }
+  }
+
+  return gaps;
+};
+
+const buildActionableResources = (ctx: PlanningContext): string[] => {
+  const lines: string[] = [];
+  const resources = [...ctx.snapshot.nearby_summary.resources].sort((a, b) => a.distance - b.distance);
+
+  for (const resource of resources) {
+    const requiredTool = requiredToolForBlock(ctx, resource.type);
+    const actionable = !requiredTool || hasItem(ctx, requiredTool, 1);
+    if (!actionable) {
+      continue;
+    }
+    lines.push(`${resource.type}@${Math.round(resource.distance)}`);
+    if (lines.length >= 10) {
+      break;
+    }
+  }
+
+  return lines;
+};
+
 const createContext = (snapshot: SnapshotV1, mcVersion: string): PlanningContext => ({
   mcData: getMcData(mcVersion),
   snapshot,
@@ -545,27 +641,66 @@ export const enforceSubgoalPrerequisites = (
     if (subgoal.name === "collect" || subgoal.name === "goto_nearest") {
       const target = targetNameFromSubgoal(subgoal);
       const blockName = resolveBlockFromTarget(ctx, target);
-      if (blockName) {
-        const requiredTool = requiredToolForBlock(ctx, blockName);
-        if (requiredTool && !hasItem(ctx, requiredTool, 1)) {
-          guarded.push(...planAcquireItem(ctx, requiredTool, 1, notes));
-          notes.push(`inserted_tool_prereq_${requiredTool}_for_${blockName}`);
-        }
-
-        const canonical: PlannerSubgoal = {
-          ...subgoal,
-          params: {
-            ...subgoal.params,
-            block: blockName
+      if (!blockName) {
+        if (subgoal.name === "collect" && target) {
+          const desiredCount = parseDesiredCountFromSubgoal(subgoal);
+          const replacement = planAcquireItem(ctx, target, desiredCount, notes);
+          if (replacement.length > 0) {
+            guarded.push(...replacement);
+            notes.push(`replaced_unresolved_collect_${target}`);
+            continue;
           }
-        };
-        guarded.push(canonical);
-        applyProjectedOutcome(ctx, canonical);
+        }
+        guarded.push(makeExploreFallback(target));
+        notes.push(`replaced_unresolved_${subgoal.name}_${target || "unknown"}`);
         continue;
       }
+
+      const requiredTool = requiredToolForBlock(ctx, blockName);
+      if (requiredTool && !hasItem(ctx, requiredTool, 1)) {
+        guarded.push(...planAcquireItem(ctx, requiredTool, 1, notes));
+        notes.push(`inserted_tool_prereq_${requiredTool}_for_${blockName}`);
+      }
+
+      const canonical: PlannerSubgoal = {
+        ...subgoal,
+        params: {
+          ...subgoal.params,
+          block: blockName
+        }
+      };
+      guarded.push(canonical);
+      applyProjectedOutcome(ctx, canonical);
+      continue;
     }
 
     if (subgoal.name === "craft") {
+      const itemName = String(
+        subgoal.params.item ??
+          subgoal.params.output ??
+          subgoal.params.result ??
+          subgoal.params.type ??
+          ""
+      );
+      const desiredCount = parseDesiredCountFromSubgoal(subgoal);
+      if (!itemName) {
+        notes.push("dropped_invalid_craft_without_item");
+        continue;
+      }
+
+      const recipeExists = Boolean(pickRecipePlan(ctx, itemName));
+      if (!recipeExists) {
+        const replacement = planAcquireItem(ctx, itemName, desiredCount, notes);
+        if (replacement.length > 0) {
+          guarded.push(...replacement);
+          notes.push(`replaced_uncraftable_craft_${itemName}`);
+        } else {
+          guarded.push(makeExploreFallback(itemName));
+          notes.push(`replaced_unresolved_craft_${itemName}`);
+        }
+        continue;
+      }
+
       const prereqs = ensureCraftPrerequisites(ctx, subgoal, notes);
       guarded.push(...prereqs);
     }
@@ -575,7 +710,7 @@ export const enforceSubgoalPrerequisites = (
   }
 
   return {
-    subgoals: guarded,
+    subgoals: dedupeAdjacentSubgoals(guarded, notes),
     notes
   };
 };
@@ -616,5 +751,25 @@ export const buildAutonomousProgressionPlan = (
         success_criteria: { explored_points_min: 2 }
       }
     ]
+  };
+};
+
+export const deriveProgressionHint = (
+  snapshot: SnapshotV1,
+  mcVersion = "1.20.4",
+  desiredIncrement = 8
+): ProgressionHint => {
+  const ctx = createContext(snapshot, mcVersion);
+  const autonomous = buildAutonomousProgressionPlan(snapshot, mcVersion, desiredIncrement);
+  const recommendation = enforceSubgoalPrerequisites(snapshot, autonomous.subgoals, mcVersion);
+
+  return {
+    recommendedGoal: autonomous.reason,
+    recommendedSubgoals: recommendation.subgoals.slice(0, 4).map((subgoal) => ({
+      name: subgoal.name,
+      params: subgoal.params
+    })),
+    capabilityGaps: buildCapabilityGaps(ctx),
+    actionableResources: buildActionableResources(ctx)
   };
 };

@@ -4,7 +4,7 @@ import { buildFallbackPlan, type BasePosition } from "./fallback-planner";
 import { VertexGeminiClient } from "./gemini-client";
 import { PlannerRateLimiter } from "./rate-limiter";
 import { SchemaValidator } from "./schema-validator";
-import { enforceSubgoalPrerequisites } from "./subgoal-guard";
+import { deriveProgressionHint, enforceSubgoalPrerequisites, type ProgressionHint } from "./subgoal-guard";
 import { normalizePlannerSubgoals } from "./subgoal-normalizer";
 import { sleep, withJitter } from "../utils/time";
 
@@ -128,7 +128,11 @@ const plansEquivalent = (
   return true;
 };
 
-const buildPrompt = (request: PlannerRequestV1, options: PromptOptions): string => {
+const buildPrompt = (
+  request: PlannerRequestV1,
+  options: PromptOptions,
+  progressionHint: ProgressionHint
+): string => {
   const inventorySummary = summarizeInventory(request);
   const nearbySummary = summarizeNearby(request);
   const failureSummary = summarizeRecentFailures(request);
@@ -165,11 +169,23 @@ const buildPrompt = (request: PlannerRequestV1, options: PromptOptions): string 
     "2) Validate every subgoal precondition against that projected state.",
     "3) If any precondition is missing, prepend prerequisite subgoals first.",
     "4) Re-simulate after each subgoal and remove impossible/out-of-order actions.",
+    "5) If resource/tool prerequisites are unknown, favor exploratory subgoals before committing.",
     "Progression rules:",
     "- Respect tool and recipe dependencies implied by the current inventory and world state.",
     "- If an action needs prerequisites, include prerequisite subgoals first.",
     "- Prefer 2-4 coherent subgoals that continue one mission to completion.",
+    "- Keep each subgoal executable immediately by deterministic skills (no hidden prerequisites).",
     "Use short deterministic subgoals (max 4), keep params concrete and executable.",
+    "Deterministic progression frontier (computed from inventory + nearby resources + Minecraft data):",
+    `- recommended_goal: ${progressionHint.recommendedGoal}`,
+    `- recommended_subgoals: ${JSON.stringify(progressionHint.recommendedSubgoals)}`,
+    `- capability_gaps: ${
+      progressionHint.capabilityGaps.length > 0 ? progressionHint.capabilityGaps.join(", ") : "none"
+    }`,
+    `- actionable_resources: ${
+      progressionHint.actionableResources.length > 0 ? progressionHint.actionableResources.join(", ") : "none"
+    }`,
+    "Prefer plans that resolve the earliest capability gap unless safety triggers demand otherwise.",
     "Planning context summary:",
     `- inventory: ${inventorySummary}`,
     `- nearby: ${nearbySummary || "none"}`,
@@ -265,8 +281,9 @@ export class PlannerService {
     try {
       const feasibilityRepromptEnabled = this.options.feasibilityRepromptEnabled ?? true;
       const feasibilityRepromptMaxAttempts = Math.max(0, this.options.feasibilityRepromptMaxAttempts ?? 1);
+      const progressionHint = deriveProgressionHint(request.snapshot, this.options.mcVersion);
 
-      let modelPlan = await callModelWithPrompt(buildPrompt(request, { mode: "initial" }));
+      let modelPlan = await callModelWithPrompt(buildPrompt(request, { mode: "initial" }, progressionHint));
       let totalTokensIn = modelPlan.tokensIn ?? 0;
       let totalTokensOut = modelPlan.tokensOut ?? 0;
       let notes = [...modelPlan.notes];
@@ -300,7 +317,7 @@ export class PlannerService {
             previousSubgoals: modelPlan.normalizedSubgoals,
             guardedSubgoals: guarded.subgoals,
             guardNotes: guarded.notes
-          });
+          }, progressionHint);
 
           try {
             const repaired = await callModelWithPrompt(repairedPrompt);

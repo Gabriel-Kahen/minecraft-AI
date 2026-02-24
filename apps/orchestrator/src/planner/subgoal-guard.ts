@@ -601,6 +601,19 @@ const buildCapabilityGaps = (ctx: PlanningContext): string[] => {
   return gaps;
 };
 
+const parseCapabilityGap = (
+  gap: string
+): { resource: string; requiredTool: string } | null => {
+  const splitIndex = gap.indexOf("->");
+  if (splitIndex <= 0 || splitIndex >= gap.length - 2) {
+    return null;
+  }
+  return {
+    resource: gap.slice(0, splitIndex),
+    requiredTool: gap.slice(splitIndex + 2)
+  };
+};
+
 const buildActionableResources = (ctx: PlanningContext): string[] => {
   const lines: string[] = [];
   const resources = [...ctx.snapshot.nearby_summary.resources].sort((a, b) => a.distance - b.distance);
@@ -722,21 +735,72 @@ export const buildAutonomousProgressionPlan = (
 ): AutonomousPlan => {
   const ctx = createContext(snapshot, mcVersion);
   const notes: string[] = [];
+  const capabilityGaps = buildCapabilityGaps(ctx);
+
+  // First, close explicit tool/capability gaps so progression advances (logs -> planks -> tools -> stone/ore).
+  for (const gap of capabilityGaps) {
+    const parsedGap = parseCapabilityGap(gap);
+    if (!parsedGap) {
+      continue;
+    }
+    if (hasItem(ctx, parsedGap.requiredTool, 1)) {
+      continue;
+    }
+    const unlockSubgoals = planAcquireItem(ctx, parsedGap.requiredTool, 1, notes);
+    if (unlockSubgoals.length > 0) {
+      return {
+        reason: `unlock_${parsedGap.requiredTool}_for_${parsedGap.resource}`,
+        subgoals: unlockSubgoals
+      };
+    }
+  }
+
   const sortedResources = [...snapshot.nearby_summary.resources]
     .filter((resource) => resource.type !== "water")
     .sort((a, b) => a.distance - b.distance);
 
-  for (const resource of sortedResources) {
-    const itemName = primaryDroppedItemForBlock(ctx, resource.type);
-    if (!itemName) {
-      continue;
-    }
+  const candidates = sortedResources
+    .map((resource) => {
+      const itemName = primaryDroppedItemForBlock(ctx, resource.type);
+      if (!itemName) {
+        return null;
+      }
+      const requiredTool = requiredToolForBlock(ctx, resource.type);
+      const actionable = !requiredTool || hasItem(ctx, requiredTool, 1);
+      const current = ctx.projected.get(itemName) ?? 0;
+      const shortage = Math.max(0, desiredIncrement - current);
+      return {
+        resource,
+        itemName,
+        actionable,
+        current,
+        shortage
+      };
+    })
+    .filter(
+      (
+        candidate
+      ): candidate is {
+        resource: SnapshotV1["nearby_summary"]["resources"][number];
+        itemName: string;
+        actionable: boolean;
+        current: number;
+        shortage: number;
+      } => Boolean(candidate && candidate.actionable && candidate.shortage > 0)
+    )
+    .sort((left, right) => {
+      if (left.shortage !== right.shortage) {
+        return right.shortage - left.shortage;
+      }
+      return left.resource.distance - right.resource.distance;
+    });
 
-    const desired = (ctx.projected.get(itemName) ?? 0) + desiredIncrement;
-    const subgoals = planAcquireItem(ctx, itemName, desired, notes);
+  for (const candidate of candidates) {
+    const desired = Math.max(desiredIncrement, candidate.current + candidate.shortage);
+    const subgoals = planAcquireItem(ctx, candidate.itemName, desired, notes);
     if (subgoals.length > 0) {
       return {
-        reason: `acquire_${itemName}`,
+        reason: `acquire_${candidate.itemName}`,
         subgoals
       };
     }

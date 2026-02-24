@@ -1,4 +1,4 @@
-import type { PlannerRequestV1, PlannerResponseV1 } from "../../../../contracts/planner";
+import type { ActionHistoryEntry, PlannerRequestV1, PlannerResponseV1 } from "../../../../contracts/planner";
 import { SUBGOAL_NAMES } from "../../../../contracts/skills";
 import { buildFallbackPlan, type BasePosition } from "./fallback-planner";
 import { VertexGeminiClient } from "./gemini-client";
@@ -106,6 +106,54 @@ const summarizeRecentFailures = (request: PlannerRequestV1): string => {
   return failures.length > 0 ? failures.join(", ") : "none";
 };
 
+const latestFailureEntry = (request: PlannerRequestV1): ActionHistoryEntry | null => {
+  for (let index = request.history.length - 1; index >= 0; index -= 1) {
+    const candidate = request.history[index];
+    if (candidate?.outcome === "FAILURE") {
+      return candidate;
+    }
+  }
+  return null;
+};
+
+const buildFailureAnalysisSection = (request: PlannerRequestV1): string[] => {
+  const latestFailure = latestFailureEntry(request);
+  const lastError = request.snapshot.task_context.last_error;
+  if (!latestFailure && !lastError) {
+    return [];
+  }
+
+  const failureFacts = compact([
+    latestFailure
+      ? `latest_failure_subgoal=${latestFailure.subgoal_name} error=${
+          latestFailure.error_code ?? "UNKNOWN"
+        } details=${latestFailure.error_details ?? "none"}`
+      : null,
+    lastError ? `snapshot_last_error=${lastError.code} details=${lastError.details}` : null
+  ]);
+
+  const craftOrDependencyFailure =
+    latestFailure?.subgoal_name === "craft" ||
+    latestFailure?.error_code === "DEPENDS_ON_ITEM" ||
+    latestFailure?.error_code === "NO_TOOL_AVAILABLE" ||
+    (lastError?.code === "DEPENDS_ON_ITEM" || lastError?.code === "NO_TOOL_AVAILABLE");
+
+  return [
+    "Failure-analysis loop (MANDATORY for this plan due to recent failure):",
+    ...failureFacts.map((fact) => `- ${fact}`),
+    "Before you output subgoals, answer internally:",
+    "1) What exactly failed, and what concrete precondition was missing?",
+    "2) Does inventory currently contain required items/tools for the intended action?",
+    "3) Is required workstation/container nearby or in inventory (crafting_table/furnace/chest)?",
+    "4) What prerequisite subgoals must run first to make retry feasible?",
+    "5) After prerequisites, what is the earliest safe retry step with explicit success criteria?",
+    craftOrDependencyFailure
+      ? "Craft/dependency diagnostic checks (must be applied): does the bot have recipe inputs, does it have or can it place/use a crafting_table, and if not, prepend gather/craft-table subgoals before any craft retry."
+      : "If the failure is navigation/resource-related, validate reachability and fallback acquisition strategy before retry.",
+    "Plan ordering rule after failure: first 1-2 subgoals must resolve the detected root cause; do not immediately repeat the failed subgoal unless prerequisites are now satisfied."
+  ];
+};
+
 const subgoalSignature = (subgoal: PlannerResponseV1["subgoals"][number]): string =>
   JSON.stringify({
     name: subgoal.name,
@@ -136,6 +184,7 @@ const buildPrompt = (
   const inventorySummary = summarizeInventory(request);
   const nearbySummary = summarizeNearby(request);
   const failureSummary = summarizeRecentFailures(request);
+  const failureAnalysisSection = buildFailureAnalysisSection(request);
 
   const repairSection =
     options.mode === "repair"
@@ -190,6 +239,7 @@ const buildPrompt = (
     `- inventory: ${inventorySummary}`,
     `- nearby: ${nearbySummary || "none"}`,
     `- recent_failures: ${failureSummary}`,
+    ...failureAnalysisSection,
     ...repairSection,
     "Request payload:",
     JSON.stringify(request)

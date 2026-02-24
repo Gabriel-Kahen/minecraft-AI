@@ -83,6 +83,7 @@ export interface BotControllerDependencies {
 interface SpeculativePlanBuffer {
   preparedAtMs: number;
   forSubgoalId: string;
+  basedOnGoal: string | null;
   nextGoal: string | null;
   subgoals: RuntimeSubgoal[];
   plannerStatus: "SUCCESS" | "RATE_LIMITED" | "FALLBACK";
@@ -150,6 +151,8 @@ export class BotController {
   private currentSubgoalHadDeath = false;
 
   private forcedDisconnectReason: string | null = null;
+
+  private deferredImmediatePlanReason: string | null = null;
 
   private lastStuckTriggerAtMs = 0;
 
@@ -1327,6 +1330,7 @@ export class BotController {
         this.speculativePlan = {
           preparedAtMs: Date.now(),
           forSubgoalId: "__any__",
+          basedOnGoal: this.taskState.currentGoal,
           nextGoal: outcome.response.next_goal,
           subgoals: guarded.subgoals.map((subgoal) => this.runtimeSubgoal(subgoal)),
           plannerStatus: outcome.status
@@ -1351,8 +1355,27 @@ export class BotController {
     if (!this.speculativePlan) {
       return false;
     }
+    const criticalTriggerPending = this.taskState.pendingTriggers.some(
+      (trigger) => trigger !== "SUBGOAL_COMPLETED"
+    );
+    if (criticalTriggerPending) {
+      return false;
+    }
     const ageMs = Date.now() - this.speculativePlan.preparedAtMs;
     if (ageMs > this.deps.config.PLAN_PREFETCH_MAX_AGE_MS) {
+      this.speculativePlan = null;
+      return false;
+    }
+    if (
+      this.taskState.currentGoal &&
+      this.speculativePlan.basedOnGoal &&
+      this.taskState.currentGoal !== this.speculativePlan.basedOnGoal
+    ) {
+      this.log("PLANNER_PREFETCH_DROPPED", {
+        reason: "goal_mismatch",
+        current_goal: this.taskState.currentGoal,
+        prefetched_goal_base: this.speculativePlan.basedOnGoal
+      });
       this.speculativePlan = null;
       return false;
     }
@@ -1582,6 +1605,7 @@ export class BotController {
         this.speculativePlan = {
           preparedAtMs: Date.now(),
           forSubgoalId: "__any__",
+          basedOnGoal: this.taskState.currentGoal,
           nextGoal: plannedGoal,
           subgoals: plannedQueue,
           plannerStatus: outcome.status
@@ -1666,6 +1690,7 @@ export class BotController {
     this.taskState.busy = true;
     this.taskState.currentSubgoal = subgoal;
     this.currentSubgoalHadDeath = false;
+    this.deferredImmediatePlanReason = null;
     this.speculativeAttemptForSubgoalId = null;
     this.currentSubgoalStartedAtMs = Date.now();
     this.currentSubgoalTimeoutHandled = false;
@@ -1826,7 +1851,7 @@ export class BotController {
           }
           this.taskState.plannerCooldownUntil = Date.now();
           this.taskState.pendingTriggers = ["SUBGOAL_FAILED"];
-          this.dispatchImmediatePlan("subgoal_failed_hard");
+          this.deferredImmediatePlanReason = "subgoal_failed_hard";
         }
         this.deps.metrics.recordFailure(this.botId, result.errorCode);
       } else {
@@ -1839,7 +1864,7 @@ export class BotController {
           const consumedPrefetch = this.consumeSpeculativePlanIfFresh(subgoal.id);
           if (!consumedPrefetch) {
             this.taskState.pendingTriggers = ["SUBGOAL_COMPLETED"];
-            this.dispatchImmediatePlan("subgoal_completed_queue_empty");
+            this.deferredImmediatePlanReason = "subgoal_completed_queue_empty";
           }
         }
       }
@@ -1878,6 +1903,11 @@ export class BotController {
       this.currentSubgoalStartedAtMs = 0;
       this.currentSubgoalTimeoutHandled = false;
       this.deps.skillLimiter.leave(this.botId);
+      const deferredReason = this.deferredImmediatePlanReason;
+      this.deferredImmediatePlanReason = null;
+      if (deferredReason) {
+        this.dispatchImmediatePlan(deferredReason);
+      }
     }
     return true;
   }
